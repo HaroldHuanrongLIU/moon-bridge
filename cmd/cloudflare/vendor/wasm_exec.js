@@ -541,6 +541,7 @@ async run(instance, context) {
 				const event = { id: id, this: this, args: arguments };
 				go._pendingEvent = event;
 				go._resume();
+				go._resume();
 				return event.result;
 			};
 		}
