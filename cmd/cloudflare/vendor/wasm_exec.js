@@ -237,7 +237,8 @@
 			}
 
 			const timeOrigin = Date.now() - performance.now();
-			this.importObject = {
+			console.log('[wasm] Go() constructor, setting up importObject');
+		this.importObject = {
 				wasi_snapshot_preview1: {
 					// https://github.com/WebAssembly/WASI/blob/main/phases/snapshot/docs.md#fd_write
 					fd_write: function(fd, iovs_ptr, iovs_len, nwritten_ptr) {
@@ -272,6 +273,7 @@
 					fd_fdstat_get: () => 0, // dummy
 					fd_seek: () => 0,       // dummy
 					proc_exit: (code) => {
+						console.log('[wasm] proc_exit code=' + code);
 						this.exited = true;
 						this.exitCode = code;
 						this._resolveExitPromise();
@@ -472,6 +474,7 @@
 		}
 
 async run(instance, context) {
+			console.log("[wasm] go.run() start");
 			const globalProxy = new Proxy(global, {
 				get(target, prop) {
 					if (prop === 'context') {
