@@ -24,6 +24,8 @@ import (
 )
 
 func main() {
+	logger.Init(logger.Config{Level: logger.LevelInfo, Format: "text", Output: os.Stderr})
+	logger.Info("[log] logger initialized")
 	slog.Info("[init] main() start")
 	start := time.Now()
 
