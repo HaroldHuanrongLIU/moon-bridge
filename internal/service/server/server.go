@@ -296,10 +296,11 @@ func (server *Server) handleResponses(writer http.ResponseWriter, request *http.
 		record.OpenAIResponse = payload
 		server.writeTrace(record)
 		writeOpenAIError(writer, status, payload)
-		server.onRequestCompleted(
-			responsesRequest.Model, anthropicRequest.Model, requestStart,
-			0, 0, 0, 0, 0, "error", payload.Error.Message,
-		)
+			server.onRequestCompleted(
+				responsesRequest.Model, anthropicRequest.Model, requestStart,
+				0, 0, 0, 0, 0, "error", payload.Error.Message,
+			)
+		logger.Flush()
 		return
 	}
 
@@ -639,6 +640,7 @@ func (server *Server) handleOpenAIResponse(writer http.ResponseWriter, request *
 		server.writeTrace(record)
 		hookErr = "missing base_url"
 		writeOpenAIError(writer, http.StatusBadGateway, payload)
+		logger.Flush()
 		return
 	}
 
@@ -686,6 +688,7 @@ func (server *Server) handleOpenAIResponse(writer http.ResponseWriter, request *
 		record.OpenAIResponse = payload
 		server.writeTrace(record)
 		writeOpenAIError(writer, http.StatusBadGateway, payload)
+		logger.Flush()
 		return
 	}
 	upstreamReq.Header.Set("Content-Type", "application/json")
@@ -715,6 +718,7 @@ func (server *Server) handleOpenAIResponse(writer http.ResponseWriter, request *
 		record.OpenAIResponse = payload
 		server.writeTrace(record)
 		writeOpenAIError(writer, http.StatusBadGateway, payload)
+		logger.Flush()
 		return
 	}
 	defer upstreamResp.Body.Close()
