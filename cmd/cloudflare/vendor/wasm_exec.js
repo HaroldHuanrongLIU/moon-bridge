@@ -482,7 +482,7 @@ async run(instance, context) {
 					if (prop === 'context') {
 						return context;
 					}
-					var v = target[prop]; return typeof v === "function" ? v.bind(target) : v;
+					return target[prop];
 				}
 			})
 			this._inst = instance;
