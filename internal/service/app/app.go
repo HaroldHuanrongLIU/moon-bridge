@@ -126,7 +126,6 @@ func runTransform(ctx context.Context, cfg config.Config, errors io.Writer) erro
 	logger.SetConsumeFunc(func(entries []logger.LogEntry) []logger.LogEntry {
 		return plugins.ConsumeGlobalLog(entries)
 	})
-
 	handler := server.New(server.Config{
 		Bridge:      bridge.New(cfg, cache.NewMemoryRegistry(), pluginhooks.PluginHooksFromRegistry(plugins)),
 		Provider:    fallbackProvider,
@@ -134,6 +133,7 @@ func runTransform(ctx context.Context, cfg config.Config, errors io.Writer) erro
 		Tracer:      tracer,
 		TraceErrors: errors,
 		Stats:       sessionStats,
+		PluginRegistry: plugins,
 		AppConfig:   cfg,
 	})
 

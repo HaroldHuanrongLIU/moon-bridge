@@ -4,6 +4,7 @@ import (
 	"log/slog"
 
 	deepseekv4 "moonbridge/internal/extension/deepseek_v4"
+	mbtrics "moonbridge/internal/extension/metrics"
 	"moonbridge/internal/extension/plugin"
 	"moonbridge/internal/extension/visual"
 	"moonbridge/internal/foundation/config"
@@ -19,6 +20,7 @@ func (BuiltinExtensionCatalog) ConfigSpecs() []config.ExtensionConfigSpec {
 	var specs []config.ExtensionConfigSpec
 	specs = append(specs, deepseekv4.ConfigSpecs()...)
 	specs = append(specs, visual.ConfigSpecs()...)
+	specs = append(specs, mbtrics.ConfigSpecs()...)
 	return specs
 }
 
@@ -26,5 +28,6 @@ func (BuiltinExtensionCatalog) NewRegistry(logger *slog.Logger, cfg config.Confi
 	registry := plugin.NewRegistry(logger)
 	registry.Register(deepseekv4.NewPlugin())
 	registry.Register(visual.NewPlugin())
+	registry.Register(mbtrics.NewPlugin())
 	return registry
 }

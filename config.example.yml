@@ -28,6 +28,13 @@ extensions:
       model: "kimi-for-coding"
       max_rounds: 4
       max_tokens: 2048
+  metrics:
+    config:
+      # Path to the SQLite database for per-request usage metrics persistence.
+      # When set, each request records model, token usage, cost, timing, and status.
+      # Relative paths are resolved from the current working directory.
+      # Leave empty (or omit) to disable metrics persistence.
+      # sqlite_path: "metrics.db"  # uncomment to enable
 
 provider:
   providers:
