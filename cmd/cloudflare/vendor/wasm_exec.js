@@ -302,10 +302,10 @@
 							}
 						}, Number(timeout)/1e6);
 					},
-				"runtime.getRandomData": (sp) => {
-					sp >>>= 0;
-					crypto.getRandomValues(loadSlice(sp + 8));
-				},
+					"runtime.getRandomData": (sp) => {
+						sp >>>= 0;
+						crypto.getRandomValues(loadSlice(sp + 8));
+					},
 
 					// func finalizeRef(v ref)
 					"syscall/js.finalizeRef": (v_ref) => {
