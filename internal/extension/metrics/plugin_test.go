@@ -1,13 +1,18 @@
 package metrics_test
 
 import (
+	"context"
+	"database/sql"
 	"net/http"
 	"testing"
+	"time"
 
 	mbtrics "moonbridge/internal/extension/metrics"
 	"moonbridge/internal/extension/plugin"
 	"moonbridge/internal/foundation/config"
 	"moonbridge/internal/foundation/db"
+
+	_ "modernc.org/sqlite"
 )
 
 func TestName(t *testing.T) {
@@ -96,6 +101,57 @@ func TestOnRequestCompletedNilStore(t *testing.T) {
 		InputTokens: 100,
 		Status:      "success",
 	})
+}
+
+func TestOnRequestCompletedRecordsRawTelemetry(t *testing.T) {
+	p := mbtrics.NewPlugin()
+	database, err := sql.Open("sqlite", ":memory:")
+	if err != nil {
+		t.Fatalf("sql.Open error = %v", err)
+	}
+	t.Cleanup(func() { database.Close() })
+	table := mbtrics.MetricsTable()
+	if _, err := database.ExecContext(context.Background(), renderMetricsDDL(table.Schema)); err != nil {
+		t.Fatalf("create metrics table error = %v", err)
+	}
+	if err := p.BindStore(&testStore{db: database}); err != nil {
+		t.Fatalf("BindStore error = %v", err)
+	}
+	p.OnRequestCompleted(nil, plugin.RequestResult{
+		Model:         "kimi",
+		ActualModel:   "kimi-for-coding",
+		InputTokens:   85822,
+		OutputTokens:  145,
+		CacheRead:     85248,
+		Status:        "success",
+		Duration:      15 * time.Millisecond,
+		CacheCreation: 0,
+		Usage: plugin.RequestUsage{
+			Protocol:                "anthropic",
+			UsageSource:             "anthropic_stream",
+			RawInputTokens:          85822,
+			RawOutputTokens:         145,
+			RawCacheRead:            85248,
+			NormalizedInputTokens:   85822,
+			NormalizedOutputTokens:  145,
+			NormalizedCacheRead:     85248,
+			RawUsageJSON:            []byte(`{"input_tokens":85822,"cache_read_input_tokens":85248}`),
+			NormalizedCacheCreation: 0,
+			RawCacheCreation:        0,
+		},
+	})
+	store := mbtrics.NewStore(&testStore{db: database})
+	records, err := store.Query(mbtrics.QueryOptions{Limit: 1})
+	if err != nil {
+		t.Fatalf("Query error = %v", err)
+	}
+	if len(records) != 1 {
+		t.Fatalf("records len = %d", len(records))
+	}
+	got := records[0]
+	if got.UsageSource != "anthropic_stream" || got.RawCacheRead != 85248 || got.NormalizedInputTokens != 85822 {
+		t.Fatalf("record = %+v", got)
+	}
 }
 
 func TestRegisterRoutesNilStore(t *testing.T) {

@@ -444,9 +444,11 @@ flowchart LR
 {UpstreamModel} Usage: {input_m} M Input, {output_m} M Output, Session Cache Hit Rate: {rate}%, Billing: {total} CNY
 ```
 
-其中 `{UpstreamModel}` 是实际转发到上游的模型名，`Billing` 是 session 累计费用。每请求 `Input` 展示采用 OpenAI 语义：`input_tokens + cache_read_input_tokens`，不把 `cache_creation_input_tokens` 额外计入展示值；cache creation 仍按 `cache_write_price` 计费，并保留在详细汇总里。
+其中 `{UpstreamModel}` 是实际转发到上游的模型名，`Billing` 是 session 累计费用。session stats 和 usage log 使用 Provider 计费维度：fresh input、cache creation、cache read、output 分别累计和计价；OpenAI Responses 的 fresh input 由 `usage.input_tokens - input_tokens_details.cached_tokens` 得到。Response normalized usage 只用于下游客户端兼容，不作为 stats 的计费输入。
 
 流式 Anthropic usage 的 cache 字段可能出现在 `message_start` 或后续 `message_delta`。Moon Bridge 会合并两处事件中的 `input_tokens`、`cache_read_input_tokens`、`cache_creation_input_tokens` 和 `output_tokens` 后再记录统计与输出 Responses usage，因此 Kimi for Coding 这类后置 cache usage 的 Provider 也能正确显示缓存命中率。
+
+metrics 扩展在 RequestCompletionHook 侧记录每次请求的观测数据，但 token 字段分成两层：`raw_*` 是 Provider 原始 telemetry，`normalized_*` 是 Moon Bridge 输出给下游客户端的兼容口径。Anthropic non-stream 直接来自 `MessageResponse.Usage`；Anthropic stream 会先合并 `message_start` / `message_delta`，并识别部分 Provider 在 `message_start.input_tokens` 中已包含 cache token 的布局，避免 normalized total 重复相加；`openai-response` 直通则从响应 body 或 SSE 的最后一个 usage 事件读取 OpenAI Responses 原始 usage。OpenAI Responses usage 没有 cache creation 字段，因此 metrics 对该协议的 `raw_cache_creation` / `normalized_cache_creation` 为 0。
 
 服务器关闭时输出完整会话费用汇总，包含按模型分组的费用明细和缓存命中率：
 

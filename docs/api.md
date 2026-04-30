@@ -220,6 +220,53 @@ data: {"type":"response.completed","response":{...}}
 2. 追加 `provider.routes` 中的别名作为补充
 3. 为每个模型生成 `base_instructions`（来自 `default_instructions.txt` 模板）
 
+## `GET /v1/admin/metrics`
+
+启用 `metrics` 扩展并绑定数据库 Provider 后可用。接口返回最近请求指标，支持 `limit`、`offset`、`model`、`status`、`since`、`until`、`order=asc` 查询参数。
+
+### 响应格式
+
+```json
+{
+  "records": [
+    {
+      "id": 1,
+      "timestamp": "2026-04-30T06:40:00Z",
+      "model": "moonbridge",
+      "actual_model": "kimi-for-coding",
+      "input_tokens": 85822,
+      "output_tokens": 145,
+      "cache_creation": 0,
+      "cache_read": 85248,
+      "protocol": "anthropic",
+      "usage_source": "anthropic_stream",
+      "raw_input_tokens": 85822,
+      "raw_output_tokens": 145,
+      "raw_cache_creation": 0,
+      "raw_cache_read": 85248,
+      "normalized_input_tokens": 85822,
+      "normalized_output_tokens": 145,
+      "normalized_cache_creation": 0,
+      "normalized_cache_read": 85248,
+      "raw_usage_json": "{\"input_tokens\":85822,\"cache_read_input_tokens\":85248}",
+      "cost": 0.0,
+      "response_time": 150000000,
+      "status": "success"
+    }
+  ],
+  "count": 1
+}
+```
+
+字段口径：
+
+- `protocol`：请求实际走的 Provider 协议，目前为 `anthropic` 或 `openai-response`。
+- `usage_source`：usage 来源，常见值为 `anthropic_response`、`anthropic_stream`、`openai_response`、`openai_sse`；错误或未拿到 usage 时为 `none` 或空值。
+- `raw_*`：Provider 原始 telemetry。Anthropic 来自 `usage` / stream event usage，OpenAI Responses 来自响应 body 或 SSE usage。
+- `normalized_*`：Moon Bridge 用于 session 统计、费用计算和历史字段兼容的口径。
+- `input_tokens`、`output_tokens`、`cache_creation`、`cache_read`：历史兼容字段，当前等同于 normalized 口径。
+- `raw_usage_json`：原始 usage JSON 的快照。OpenAI Responses 原生 usage 不提供 cache creation，因此 `raw_cache_creation` 为 0。
+
 ## 命令行工具
 
 Moon Bridge 提供以下命令行开关：

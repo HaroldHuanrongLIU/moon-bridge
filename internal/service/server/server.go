@@ -137,10 +137,14 @@ func (server *Server) listModels() []codex.ModelInfo {
 
 // Only called after the request model is known (JSON parse succeeded).
 // Early errors (bad method, read failure, decode failure) are not recorded.
-func (server *Server) onRequestCompleted(model, actualModel string, startTime time.Time, inputTokens, outputTokens, cacheCreation, cacheRead int, cost float64, status, errMsg string) {
+func (server *Server) onRequestCompleted(model, actualModel string, startTime time.Time, usage plugin.RequestUsage, cost float64, status, errMsg string) {
 	if server.pluginRegistry == nil {
 		return
 	}
+	inputTokens := usage.NormalizedInputTokens
+	outputTokens := usage.NormalizedOutputTokens
+	cacheCreation := usage.NormalizedCacheCreation
+	cacheRead := usage.NormalizedCacheRead
 	server.pluginRegistry.OnRequestCompleted(
 		&plugin.RequestContext{ModelAlias: model},
 		plugin.RequestResult{
@@ -154,6 +158,7 @@ func (server *Server) onRequestCompleted(model, actualModel string, startTime ti
 			Duration:      time.Since(startTime),
 			Status:        status,
 			ErrorMessage:  errMsg,
+			Usage:         usage,
 		},
 	)
 }
@@ -167,6 +172,161 @@ func (server *Server) registerPluginRoutes() {
 	server.pluginRegistry.RegisterRoutes(func(pattern string, handler http.Handler) {
 		server.mux.Handle(pattern, handler)
 	})
+}
+
+func usageFromAnthropic(protocol string, source string, usage anthropic.Usage, inputIncludesCache bool) plugin.RequestUsage {
+	raw := mustMarshalJSON(usage)
+	normalizedInputTokens := anthropicNormalizedInputTokens(usage, inputIncludesCache)
+	return plugin.RequestUsage{
+		Protocol:    protocol,
+		UsageSource: source,
+
+		RawInputTokens:   usage.InputTokens,
+		RawOutputTokens:  usage.OutputTokens,
+		RawCacheCreation: usage.CacheCreationInputTokens,
+		RawCacheRead:     usage.CacheReadInputTokens,
+
+		NormalizedInputTokens:   normalizedInputTokens,
+		NormalizedOutputTokens:  usage.OutputTokens,
+		NormalizedCacheCreation: usage.CacheCreationInputTokens,
+		NormalizedCacheRead:     usage.CacheReadInputTokens,
+
+		RawUsageJSON: raw,
+	}
+}
+
+func anthropicUsageFromStreamEvents(events []anthropic.StreamEvent) (anthropic.Usage, stats.BillingUsage, bool) {
+	var usage anthropic.Usage
+	var billing stats.BillingUsage
+	inputIncludesCache := false
+	for _, ev := range events {
+		switch {
+		case ev.Type == "message_start" && ev.Message != nil:
+			if ev.Message.Usage.InputTokens > 0 {
+				billing.FreshInputTokens = ev.Message.Usage.InputTokens
+				billing.ProviderInputTokens = ev.Message.Usage.InputTokens
+			}
+			if ev.Message.Usage.OutputTokens > 0 {
+				billing.OutputTokens = ev.Message.Usage.OutputTokens
+			}
+			if ev.Message.Usage.CacheCreationInputTokens > 0 {
+				billing.CacheCreationInputTokens = ev.Message.Usage.CacheCreationInputTokens
+			}
+			if ev.Message.Usage.CacheReadInputTokens > 0 {
+				billing.CacheReadInputTokens = ev.Message.Usage.CacheReadInputTokens
+			}
+			usage = mergeAnthropicUsage(usage, ev.Message.Usage)
+		case ev.Type == "message_delta" && ev.Usage != nil:
+			if streamInputIncludesCache(usage, *ev.Usage) {
+				inputIncludesCache = true
+				billing.FreshInputTokens = ev.Usage.InputTokens
+				billing.ProviderInputTokens = usage.InputTokens
+			} else if ev.Usage.InputTokens > 0 {
+				billing.FreshInputTokens = ev.Usage.InputTokens
+				billing.ProviderInputTokens = ev.Usage.InputTokens
+			}
+			if ev.Usage.OutputTokens > 0 {
+				billing.OutputTokens = ev.Usage.OutputTokens
+			}
+			if ev.Usage.CacheCreationInputTokens > 0 {
+				billing.CacheCreationInputTokens = ev.Usage.CacheCreationInputTokens
+			}
+			if ev.Usage.CacheReadInputTokens > 0 {
+				billing.CacheReadInputTokens = ev.Usage.CacheReadInputTokens
+			}
+			usage = mergeAnthropicUsage(usage, *ev.Usage)
+		}
+	}
+	if billing.ProviderInputTokens == 0 {
+		billing.ProviderInputTokens = billing.InputTokens()
+	}
+	return usage, billing, inputIncludesCache
+}
+
+func mergeAnthropicUsage(current anthropic.Usage, updated anthropic.Usage) anthropic.Usage {
+	if updated.InputTokens > 0 {
+		if streamInputIncludesCache(current, updated) {
+			// Some providers put total input on message_start, then fresh/cache
+			// split on message_delta. Keep the total input while merging cache fields.
+		} else {
+			current.InputTokens = updated.InputTokens
+		}
+	}
+	if updated.OutputTokens > 0 {
+		current.OutputTokens = updated.OutputTokens
+	}
+	if updated.CacheCreationInputTokens > 0 {
+		current.CacheCreationInputTokens = updated.CacheCreationInputTokens
+	}
+	if updated.CacheReadInputTokens > 0 {
+		current.CacheReadInputTokens = updated.CacheReadInputTokens
+	}
+	return current
+}
+
+func streamInputIncludesCache(current anthropic.Usage, updated anthropic.Usage) bool {
+	return updated.InputTokens > 0 &&
+		current.InputTokens > updated.InputTokens &&
+		current.CacheCreationInputTokens == 0 &&
+		current.CacheReadInputTokens == 0 &&
+		(updated.CacheCreationInputTokens > 0 || updated.CacheReadInputTokens > 0)
+}
+
+func statsUsageFromAnthropic(usage anthropic.Usage, inputIncludesCache bool) stats.Usage {
+	return stats.Usage{
+		InputTokens:              anthropicNormalizedInputTokens(usage, inputIncludesCache),
+		OutputTokens:             usage.OutputTokens,
+		CacheCreationInputTokens: usage.CacheCreationInputTokens,
+		CacheReadInputTokens:     usage.CacheReadInputTokens,
+	}
+}
+
+func billingUsageFromAnthropic(usage anthropic.Usage) stats.BillingUsage {
+	return stats.BillingUsage{
+		FreshInputTokens:         usage.InputTokens,
+		OutputTokens:             usage.OutputTokens,
+		CacheCreationInputTokens: usage.CacheCreationInputTokens,
+		CacheReadInputTokens:     usage.CacheReadInputTokens,
+		ProviderInputTokens:      usage.InputTokens + usage.CacheCreationInputTokens + usage.CacheReadInputTokens,
+	}
+}
+
+func anthropicNormalizedInputTokens(usage anthropic.Usage, inputIncludesCache bool) int {
+	if inputIncludesCache {
+		return usage.InputTokens
+	}
+	return usage.InputTokens + usage.CacheCreationInputTokens + usage.CacheReadInputTokens
+}
+
+func usageFromStats(protocol string, source string, usage stats.Usage, rawUsage openai.Usage) plugin.RequestUsage {
+	return plugin.RequestUsage{
+		Protocol:    protocol,
+		UsageSource: source,
+
+		RawInputTokens:   usage.InputTokens,
+		RawOutputTokens:  usage.OutputTokens,
+		RawCacheCreation: usage.CacheCreationInputTokens,
+		RawCacheRead:     usage.CacheReadInputTokens,
+
+		NormalizedInputTokens:   usage.InputTokens,
+		NormalizedOutputTokens:  usage.OutputTokens,
+		NormalizedCacheCreation: usage.CacheCreationInputTokens,
+		NormalizedCacheRead:     usage.CacheReadInputTokens,
+
+		RawUsageJSON: mustMarshalJSON(rawUsage),
+	}
+}
+
+func zeroUsage(protocol string, source string) plugin.RequestUsage {
+	return plugin.RequestUsage{Protocol: protocol, UsageSource: source}
+}
+
+func mustMarshalJSON(value any) json.RawMessage {
+	data, err := json.Marshal(value)
+	if err != nil {
+		return nil
+	}
+	return data
 }
 
 func (server *Server) handleResponses(writer http.ResponseWriter, request *http.Request) {
@@ -253,7 +413,7 @@ func (server *Server) handleResponses(writer http.ResponseWriter, request *http.
 		writeOpenAIError(writer, status, payload)
 		server.onRequestCompleted(
 			responsesRequest.Model, "", requestStart,
-			0, 0, 0, 0, 0, "error", payload.Error.Message,
+			zeroUsage("anthropic", "none"), 0, "error", payload.Error.Message,
 		)
 		return
 	}
@@ -269,7 +429,7 @@ func (server *Server) handleResponses(writer http.ResponseWriter, request *http.
 		}})
 		server.onRequestCompleted(
 			responsesRequest.Model, "", requestStart,
-			0, 0, 0, 0, 0, "error", fmt.Sprintf("no upstream provider: %s", responsesRequest.Model),
+			zeroUsage("anthropic", "none"), 0, "error", fmt.Sprintf("no upstream provider: %s", responsesRequest.Model),
 		)
 		return
 	}
@@ -296,43 +456,34 @@ func (server *Server) handleResponses(writer http.ResponseWriter, request *http.
 		record.OpenAIResponse = payload
 		server.writeTrace(record)
 		writeOpenAIError(writer, status, payload)
-			server.onRequestCompleted(
-				responsesRequest.Model, anthropicRequest.Model, requestStart,
-				0, 0, 0, 0, 0, "error", payload.Error.Message,
-			)
+		server.onRequestCompleted(
+			responsesRequest.Model, anthropicRequest.Model, requestStart,
+			zeroUsage("anthropic", "none"), 0, "error", payload.Error.Message,
+		)
 		logger.Flush()
 		return
 	}
 
 	openAIResponse := server.bridge.FromAnthropicWithPlanAndContext(anthropicResponse, responsesRequest.Model, plan, conversionContext, sess.ExtensionData)
 	usage := anthropicResponse.Usage
+	billingUsage := billingUsageFromAnthropic(usage)
 	if server.stats != nil {
-		server.stats.Record(responsesRequest.Model, anthropicRequest.Model, stats.Usage{
-			InputTokens:              usage.InputTokens + usage.CacheCreationInputTokens + usage.CacheReadInputTokens,
-			OutputTokens:             usage.OutputTokens,
-			CacheCreationInputTokens: usage.CacheCreationInputTokens,
-			CacheReadInputTokens:     usage.CacheReadInputTokens,
-		})
+		server.stats.RecordBilling(responsesRequest.Model, anthropicRequest.Model, billingUsage)
 	}
-	logUsageLine(responsesRequest.Model, anthropicRequest.Model, stats.Usage{InputTokens: usage.InputTokens + usage.CacheCreationInputTokens + usage.CacheReadInputTokens, OutputTokens: usage.OutputTokens, CacheCreationInputTokens: usage.CacheCreationInputTokens, CacheReadInputTokens: usage.CacheReadInputTokens}, server.stats)
+	logBillingUsageLine(responsesRequest.Model, anthropicRequest.Model, billingUsage, server.stats)
 	record.AnthropicResponse = anthropicResponse
 	record.OpenAIResponse = openAIResponse
 	server.writeTrace(record)
 	writeJSON(writer, http.StatusOK, openAIResponse)
+	completionUsage := usageFromAnthropic("anthropic", "anthropic_response", usage, false)
 	server.onRequestCompleted(
 		responsesRequest.Model, anthropicRequest.Model, requestStart,
-		usage.InputTokens+usage.CacheCreationInputTokens+usage.CacheReadInputTokens,
-		usage.OutputTokens, usage.CacheCreationInputTokens, usage.CacheReadInputTokens,
+		completionUsage,
 		func() float64 {
 			if server.stats == nil {
 				return 0
 			}
-			return server.stats.ComputeCost(responsesRequest.Model, stats.Usage{
-				InputTokens:              usage.InputTokens + usage.CacheCreationInputTokens + usage.CacheReadInputTokens,
-				OutputTokens:             usage.OutputTokens,
-				CacheCreationInputTokens: usage.CacheCreationInputTokens,
-				CacheReadInputTokens:     usage.CacheReadInputTokens,
-			})
+			return server.stats.ComputeBillingCost(responsesRequest.Model, billingUsage)
 		}(),
 		"success", "",
 	)
@@ -360,7 +511,7 @@ func (server *Server) handleStream(writer http.ResponseWriter, request *http.Req
 		writeOpenAIError(writer, status, payload)
 		server.onRequestCompleted(
 			responsesRequest.Model, anthropicRequest.Model, streamStart,
-			0, 0, 0, 0, 0, "error", payload.Error.Message,
+			zeroUsage("anthropic", "none"), 0, "error", payload.Error.Message,
 		)
 		server.bridge.ResetCacheWarming(plan)
 		logger.Flush()
@@ -399,55 +550,26 @@ func (server *Server) handleStream(writer http.ResponseWriter, request *http.Req
 	for _, event := range openAIEvents {
 		writeSSE(writer, event)
 	}
-	// Extract usage from message_delta event
-	var usage anthropic.Usage
-	for _, ev := range events {
-		switch {
-		case ev.Type == "message_start" && ev.Message != nil:
-			// message_start carries cache_creation / cache_read token counts
-			usage.InputTokens = ev.Message.Usage.InputTokens
-			usage.CacheCreationInputTokens = ev.Message.Usage.CacheCreationInputTokens
-			usage.CacheReadInputTokens = ev.Message.Usage.CacheReadInputTokens
-		case ev.Type == "message_delta" && ev.Usage != nil:
-			usage.OutputTokens = ev.Usage.OutputTokens
-			// message_delta may also carry cache fields in some providers
-			if ev.Usage.CacheCreationInputTokens > 0 {
-				usage.CacheCreationInputTokens = ev.Usage.CacheCreationInputTokens
-			}
-			if ev.Usage.CacheReadInputTokens > 0 {
-				usage.CacheReadInputTokens = ev.Usage.CacheReadInputTokens
-			}
-		}
-	}
+	usage, billingUsage, inputIncludesCache := anthropicUsageFromStreamEvents(events)
 	if server.stats != nil {
-		server.stats.Record(responsesRequest.Model, anthropicRequest.Model, stats.Usage{
-			InputTokens:              usage.InputTokens + usage.CacheCreationInputTokens + usage.CacheReadInputTokens,
-			OutputTokens:             usage.OutputTokens,
-			CacheCreationInputTokens: usage.CacheCreationInputTokens,
-			CacheReadInputTokens:     usage.CacheReadInputTokens,
-		})
+		server.stats.RecordBilling(responsesRequest.Model, anthropicRequest.Model, billingUsage)
 	}
-	logUsageLine(responsesRequest.Model, anthropicRequest.Model, stats.Usage{InputTokens: usage.InputTokens + usage.CacheCreationInputTokens + usage.CacheReadInputTokens, OutputTokens: usage.OutputTokens, CacheCreationInputTokens: usage.CacheCreationInputTokens, CacheReadInputTokens: usage.CacheReadInputTokens}, server.stats)
+	logBillingUsageLine(responsesRequest.Model, anthropicRequest.Model, billingUsage, server.stats)
 	// Update cache registry from streaming usage signals.
 	server.bridge.UpdateRegistryFromUsage(plan, cache.UsageSignals{
 		InputTokens:              usage.InputTokens,
 		CacheCreationInputTokens: usage.CacheCreationInputTokens,
 		CacheReadInputTokens:     usage.CacheReadInputTokens,
 	}, usage.InputTokens)
+	completionUsage := usageFromAnthropic("anthropic", "anthropic_stream", usage, inputIncludesCache)
 	server.onRequestCompleted(
 		responsesRequest.Model, anthropicRequest.Model, streamStart,
-		usage.InputTokens+usage.CacheCreationInputTokens+usage.CacheReadInputTokens,
-		usage.OutputTokens, usage.CacheCreationInputTokens, usage.CacheReadInputTokens,
+		completionUsage,
 		func() float64 {
 			if server.stats == nil {
 				return 0
 			}
-			return server.stats.ComputeCost(responsesRequest.Model, stats.Usage{
-				InputTokens:              usage.InputTokens + usage.CacheCreationInputTokens + usage.CacheReadInputTokens,
-				OutputTokens:             usage.OutputTokens,
-				CacheCreationInputTokens: usage.CacheCreationInputTokens,
-				CacheReadInputTokens:     usage.CacheReadInputTokens,
-			})
+			return server.stats.ComputeBillingCost(responsesRequest.Model, billingUsage)
 		}(),
 		func() string {
 			if streamErr != "" {
@@ -603,7 +725,7 @@ func (server *Server) handleOpenAIResponse(writer http.ResponseWriter, request *
 		if hookErr != "" {
 			server.onRequestCompleted(
 				responsesRequest.Model, "", proxyStart,
-				0, 0, 0, 0, 0, "error", hookErr,
+				zeroUsage(config.ProtocolOpenAIResponse, "none"), 0, "error", hookErr,
 			)
 		}
 	}()
@@ -625,7 +747,7 @@ func (server *Server) handleOpenAIResponse(writer http.ResponseWriter, request *
 
 	// Resolve provider key from model alias when Bridge.ProviderFor returned empty.
 	// providerKey is guaranteed non-empty by the caller (handleResponses).
-	
+
 	baseURL := server.providerMgr.ProviderBaseURL(providerKey)
 	apiKey := server.providerMgr.ProviderAPIKey(providerKey)
 	if baseURL == "" {
@@ -732,8 +854,8 @@ func (server *Server) handleOpenAIResponse(writer http.ResponseWriter, request *
 	writer.WriteHeader(upstreamResp.StatusCode)
 
 	traceEnabled := server.tracer != nil && server.tracer.Enabled()
-	statsEnabled := server.stats != nil && upstreamResp.StatusCode >= 200 && upstreamResp.StatusCode <= 299
-	shouldCapture := traceEnabled || statsEnabled
+	usageEnabled := upstreamResp.StatusCode >= 200 && upstreamResp.StatusCode <= 299 && (server.stats != nil || server.pluginRegistry != nil)
+	shouldCapture := traceEnabled || usageEnabled
 
 	var captured bytes.Buffer
 	target := io.Writer(writer)
@@ -752,13 +874,20 @@ func (server *Server) handleOpenAIResponse(writer http.ResponseWriter, request *
 	}
 
 	// Capture usage for metrics recording, even when stats recording is disabled.
-	var metricUsage stats.Usage
-	if statsEnabled {
-		if u, ok := openAIUsageFromResponse(captured.Bytes(), responsesRequest.Stream); ok {
-			metricUsage = u
-			server.stats.Record(responsesRequest.Model, upstreamRequest.Model, u)
-			logUsageLine(responsesRequest.Model, upstreamRequest.Model, u, server.stats)
+	var billingUsage stats.BillingUsage
+	var metricTelemetry plugin.RequestUsage
+	if usageEnabled {
+		if u, raw, source, ok := openAIUsageFromResponse(captured.Bytes(), responsesRequest.Stream); ok {
+			billingUsage = u.BillingUsage()
+			metricTelemetry = usageFromStats(config.ProtocolOpenAIResponse, source, u, raw)
+			if server.stats != nil {
+				server.stats.RecordBilling(responsesRequest.Model, upstreamRequest.Model, billingUsage)
+				logBillingUsageLine(responsesRequest.Model, upstreamRequest.Model, billingUsage, server.stats)
+			}
 		}
+	}
+	if metricTelemetry.Protocol == "" {
+		metricTelemetry = zeroUsage(config.ProtocolOpenAIResponse, "none")
 	}
 
 	// Record metrics via plugin hooks.
@@ -770,28 +899,31 @@ func (server *Server) handleOpenAIResponse(writer http.ResponseWriter, request *
 	}
 	cost := float64(0)
 	if server.stats != nil {
-		cost = server.stats.ComputeCost(responsesRequest.Model, metricUsage)
+		cost = server.stats.ComputeBillingCost(responsesRequest.Model, billingUsage)
 	}
 	server.onRequestCompleted(
 		responsesRequest.Model, upstreamRequest.Model, proxyStart,
-		int(metricUsage.InputTokens), int(metricUsage.OutputTokens),
-		int(metricUsage.CacheCreationInputTokens), int(metricUsage.CacheReadInputTokens),
+		metricTelemetry,
 		cost, status, errMsg,
 	)
 
 }
 
 func logUsageLine(requestModel, actualModel string, usage stats.Usage, sessionStats *stats.SessionStats) {
+	logBillingUsageLine(requestModel, actualModel, usage.BillingUsage(), sessionStats)
+}
+
+func logBillingUsageLine(requestModel, actualModel string, usage stats.BillingUsage, sessionStats *stats.SessionStats) {
 	var requestCost float64
 	var summary stats.Summary
 	if sessionStats != nil {
-		requestCost = sessionStats.ComputeCost(requestModel, usage)
+		requestCost = sessionStats.ComputeBillingCost(requestModel, usage)
 		summary = sessionStats.Summary()
 	}
 	fmt.Fprintln(logger.Output(), stats.FormatUsageLine(stats.UsageLineParams{
 		RequestModel:   requestModel,
 		ActualModel:    actualModel,
-		Usage:          usage,
+		BillingUsage:   usage,
 		RequestCost:    requestCost,
 		TotalCost:      summary.TotalCost,
 		CacheHitRate:   summary.CacheHitRate,
@@ -804,9 +936,9 @@ func logUsageLine(requestModel, actualModel string, usage stats.Usage, sessionSt
 	logger.Flush()
 }
 
-func openAIUsageFromResponse(data []byte, stream bool) (stats.Usage, bool) {
+func openAIUsageFromResponse(data []byte, stream bool) (stats.Usage, openai.Usage, string, bool) {
 	if len(data) == 0 {
-		return stats.Usage{}, false
+		return stats.Usage{}, openai.Usage{}, "", false
 	}
 	if stream {
 		return openAIUsageFromSSE(data)
@@ -815,13 +947,15 @@ func openAIUsageFromResponse(data []byte, stream bool) (stats.Usage, bool) {
 		Usage openai.Usage `json:"usage"`
 	}
 	if err := json.Unmarshal(data, &payload); err != nil {
-		return stats.Usage{}, false
+		return stats.Usage{}, openai.Usage{}, "", false
 	}
-	return statsUsageFromOpenAIUsage(payload.Usage)
+	usage, ok := statsUsageFromOpenAIUsage(payload.Usage)
+	return usage, payload.Usage, "openai_response", ok
 }
 
-func openAIUsageFromSSE(data []byte) (stats.Usage, bool) {
+func openAIUsageFromSSE(data []byte) (stats.Usage, openai.Usage, string, bool) {
 	var last stats.Usage
+	var lastRaw openai.Usage
 	found := false
 	for _, event := range strings.Split(string(data), "\n\n") {
 		var payload strings.Builder
@@ -852,15 +986,17 @@ func openAIUsageFromSSE(data []byte) (stats.Usage, bool) {
 		}
 		if usage, ok := statsUsageFromOpenAIUsage(envelope.Response.Usage); ok {
 			last = usage
+			lastRaw = envelope.Response.Usage
 			found = true
 			continue
 		}
 		if usage, ok := statsUsageFromOpenAIUsage(envelope.Usage); ok {
 			last = usage
+			lastRaw = envelope.Usage
 			found = true
 		}
 	}
-	return last, found
+	return last, lastRaw, "openai_sse", found
 }
 
 func statsUsageFromOpenAIUsage(usage openai.Usage) (stats.Usage, bool) {

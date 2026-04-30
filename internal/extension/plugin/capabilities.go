@@ -135,6 +135,25 @@ type RequestResult struct {
 	Status        string // "success" or "error"
 	ErrorMessage  string
 	Duration      time.Duration
+	Usage         RequestUsage
+}
+
+// RequestUsage carries both provider-native usage and normalized display usage.
+type RequestUsage struct {
+	Protocol    string
+	UsageSource string
+
+	RawInputTokens   int
+	RawOutputTokens  int
+	RawCacheCreation int
+	RawCacheRead     int
+
+	NormalizedInputTokens   int
+	NormalizedOutputTokens  int
+	NormalizedCacheCreation int
+	NormalizedCacheRead     int
+
+	RawUsageJSON json.RawMessage
 }
 
 // RequestCompletionHook is called after each request completes, regardless

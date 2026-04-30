@@ -11,18 +11,29 @@ import (
 
 // Record represents a single request metric row.
 type Record struct {
-	ID            int64         `json:"id"`
-	Timestamp     time.Time     `json:"timestamp"`
-	Model         string        `json:"model"`
-	ActualModel   string        `json:"actual_model"`
-	InputTokens   int64         `json:"input_tokens"`
-	OutputTokens  int64         `json:"output_tokens"`
-	CacheCreation int64         `json:"cache_creation"`
-	CacheRead     int64         `json:"cache_read"`
-	Cost          float64       `json:"cost"`
-	ResponseTime  time.Duration `json:"response_time"`
-	Status        string        `json:"status"`
-	ErrorMessage  string        `json:"error_message,omitempty"`
+	ID                      int64         `json:"id"`
+	Timestamp               time.Time     `json:"timestamp"`
+	Model                   string        `json:"model"`
+	ActualModel             string        `json:"actual_model"`
+	InputTokens             int64         `json:"input_tokens"`
+	OutputTokens            int64         `json:"output_tokens"`
+	CacheCreation           int64         `json:"cache_creation"`
+	CacheRead               int64         `json:"cache_read"`
+	Protocol                string        `json:"protocol"`
+	UsageSource             string        `json:"usage_source"`
+	RawInputTokens          int64         `json:"raw_input_tokens"`
+	RawOutputTokens         int64         `json:"raw_output_tokens"`
+	RawCacheCreation        int64         `json:"raw_cache_creation"`
+	RawCacheRead            int64         `json:"raw_cache_read"`
+	NormalizedInputTokens   int64         `json:"normalized_input_tokens"`
+	NormalizedOutputTokens  int64         `json:"normalized_output_tokens"`
+	NormalizedCacheCreation int64         `json:"normalized_cache_creation"`
+	NormalizedCacheRead     int64         `json:"normalized_cache_read"`
+	RawUsageJSON            string        `json:"raw_usage_json,omitempty"`
+	Cost                    float64       `json:"cost"`
+	ResponseTime            time.Duration `json:"response_time"`
+	Status                  string        `json:"status"`
+	ErrorMessage            string        `json:"error_message,omitempty"`
 }
 
 // QueryOptions controls filtering and ordering for Record queries.
@@ -59,6 +70,17 @@ func MetricsTable() db.TableSpec {
 			output_tokens   INTEGER NOT NULL DEFAULT 0,
 			cache_creation  INTEGER NOT NULL DEFAULT 0,
 			cache_read      INTEGER NOT NULL DEFAULT 0,
+			protocol        TEXT    NOT NULL DEFAULT '',
+			usage_source    TEXT    NOT NULL DEFAULT '',
+			raw_input_tokens INTEGER NOT NULL DEFAULT 0,
+			raw_output_tokens INTEGER NOT NULL DEFAULT 0,
+			raw_cache_creation INTEGER NOT NULL DEFAULT 0,
+			raw_cache_read INTEGER NOT NULL DEFAULT 0,
+			normalized_input_tokens INTEGER NOT NULL DEFAULT 0,
+			normalized_output_tokens INTEGER NOT NULL DEFAULT 0,
+			normalized_cache_creation INTEGER NOT NULL DEFAULT 0,
+			normalized_cache_read INTEGER NOT NULL DEFAULT 0,
+			raw_usage_json TEXT    NOT NULL DEFAULT '',
 			cost            REAL    NOT NULL DEFAULT 0.0,
 			response_time_ms INTEGER NOT NULL DEFAULT 0,
 			status          TEXT    NOT NULL DEFAULT 'success',
@@ -85,11 +107,18 @@ func (s *Store) Record(r Record) error {
 	ts := r.Timestamp.UTC().Format(time.RFC3339Nano)
 	query := fmt.Sprintf(`INSERT INTO %s
 		(timestamp, model, actual_model, input_tokens, output_tokens,
-		 cache_creation, cache_read, cost, response_time_ms, status, error_message)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`, table)
+		 cache_creation, cache_read, protocol, usage_source,
+		 raw_input_tokens, raw_output_tokens, raw_cache_creation, raw_cache_read,
+		 normalized_input_tokens, normalized_output_tokens, normalized_cache_creation, normalized_cache_read,
+		 raw_usage_json, cost, response_time_ms, status, error_message)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`, table)
 	_, err = s.s.ExecContext(context.Background(), query,
 		ts, r.Model, r.ActualModel,
 		r.InputTokens, r.OutputTokens, r.CacheCreation, r.CacheRead,
+		r.Protocol, r.UsageSource,
+		r.RawInputTokens, r.RawOutputTokens, r.RawCacheCreation, r.RawCacheRead,
+		r.NormalizedInputTokens, r.NormalizedOutputTokens, r.NormalizedCacheCreation, r.NormalizedCacheRead,
+		r.RawUsageJSON,
 		r.Cost, ms, r.Status, r.ErrorMessage,
 	)
 	return err
@@ -134,7 +163,10 @@ func (s *Store) Query(opts QueryOptions) ([]Record, error) {
 	}
 
 	query := fmt.Sprintf("SELECT id, timestamp, model, actual_model, input_tokens, output_tokens, "+
-		"cache_creation, cache_read, cost, response_time_ms, status, error_message "+
+		"cache_creation, cache_read, protocol, usage_source, "+
+		"raw_input_tokens, raw_output_tokens, raw_cache_creation, raw_cache_read, "+
+		"normalized_input_tokens, normalized_output_tokens, normalized_cache_creation, normalized_cache_read, "+
+		"raw_usage_json, cost, response_time_ms, status, error_message "+
 		"FROM %s", table)
 	if len(whereClauses) > 0 {
 		query += " WHERE " + joinClauses(whereClauses)
@@ -156,6 +188,10 @@ func (s *Store) Query(opts QueryOptions) ([]Record, error) {
 		err := rows.Scan(
 			&r.ID, &ts, &r.Model, &r.ActualModel,
 			&r.InputTokens, &r.OutputTokens, &r.CacheCreation, &r.CacheRead,
+			&r.Protocol, &r.UsageSource,
+			&r.RawInputTokens, &r.RawOutputTokens, &r.RawCacheCreation, &r.RawCacheRead,
+			&r.NormalizedInputTokens, &r.NormalizedOutputTokens, &r.NormalizedCacheCreation, &r.NormalizedCacheRead,
+			&r.RawUsageJSON,
 			&r.Cost, &ms, &r.Status, &r.ErrorMessage,
 		)
 		if err != nil {
