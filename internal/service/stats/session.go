@@ -329,6 +329,8 @@ func BillingCacheRWRatio(usage BillingUsage) float64 {
 	return float64(usage.CacheReadInputTokens) / float64(usage.CacheCreationInputTokens)
 }
 
+// Deprecated: FormatUsageLine is retained for backward compatibility.
+// Request logging now uses structured slog attrs.
 func FormatUsageLine(p UsageLineParams) string {
 	usage := p.BillingUsage
 	if usage == (BillingUsage{}) {
@@ -369,6 +371,8 @@ type ErrorLineParams struct {
 	Message      string
 }
 
+// Deprecated: FormatErrorLine is retained for backward compatibility.
+// Error logging now uses structured slog attrs.
 func FormatErrorLine(p ErrorLineParams) string {
 	return fmt.Sprintf(
 		"模型: %s ➡️ %s\n"+

@@ -6,14 +6,22 @@ import (
 	"log/slog"
 	"os"
 	"strings"
+	"time"
 )
 
 var defaultLogger *slog.Logger
-var defaultOutput io.Writer
-var defaultBuffer LogBuffer
+
+// LogEntry represents a single log entry.
+// Retained for plugin LogConsumer interface compatibility; not used at runtime.
+type LogEntry struct {
+	Timestamp time.Time
+	Level     slog.Level
+	Message   string
+	Attrs     []slog.Attr
+	Raw       []byte
+}
 
 func init() {
-	defaultOutput = os.Stderr
 	defaultLogger = slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{
 		Level: slog.LevelInfo,
 	}))
@@ -58,26 +66,17 @@ func Init(cfg Config) error {
 	if err != nil {
 		return err
 	}
-	if cfg.Output == nil {
-		cfg.Output = os.Stderr
-	}
-	defaultOutput = cfg.Output
-	oldBuffer := defaultBuffer
-	defaultBuffer = NewMemoryBuffer(cfg.Output)
-	if oldBuffer != nil {
-		if ob, ok := oldBuffer.(*memoryBuffer); ok {
-			if nb, ok := defaultBuffer.(*memoryBuffer); ok {
-				nb.consumeFunc = ob.consumeFunc
-			}
-		}
+	out := cfg.Output
+	if out == nil {
+		out = os.Stderr
 	}
 	opts := &slog.HandlerOptions{Level: lvl}
 	var handler slog.Handler
 	switch strings.ToLower(strings.TrimSpace(cfg.Format)) {
 	case "json":
-		handler = slog.NewJSONHandler(cfg.Output, opts)
+		handler = slog.NewJSONHandler(out, opts)
 	default:
-		handler = slog.NewTextHandler(cfg.Output, opts)
+		handler = slog.NewTextHandler(out, opts)
 	}
 	defaultLogger = slog.New(handler)
 	return nil
@@ -86,35 +85,6 @@ func Init(cfg Config) error {
 // L returns the default logger.
 func L() *slog.Logger {
 	return defaultLogger
-}
-
-// Output returns the writer used by the default logger.
-// After the unified logging system is enabled, this returns the buffer's
-// Writer; call Buffer().Flush() to write accumulated entries.
-func Output() io.Writer {
-	if defaultBuffer != nil {
-		return defaultBuffer.Writer()
-	}
-	return defaultOutput
-}
-
-// Buffer returns the default LogBuffer instance.
-func Buffer() LogBuffer {
-	return defaultBuffer
-}
-
-// Flush flushes the default log buffer. No-op if buffer is nil.
-func Flush() {
-	if defaultBuffer != nil {
-		defaultBuffer.Flush(nil)
-	}
-}
-
-// SetConsumeFunc sets a consume callback on the default buffer.
-func SetConsumeFunc(fn func([]LogEntry) []LogEntry) {
-	if b, ok := defaultBuffer.(*memoryBuffer); ok {
-		b.SetConsumeFunc(fn)
-	}
 }
 
 // Debug logs a debug message.

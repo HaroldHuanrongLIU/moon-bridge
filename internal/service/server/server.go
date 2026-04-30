@@ -444,14 +444,13 @@ func (server *Server) handleResponses(writer http.ResponseWriter, request *http.
 	anthropicResponse, err := effectiveProvider.CreateMessage(request.Context(), anthropicRequest)
 	if err != nil {
 		status, payload := server.bridge.ErrorResponseForModel(responsesRequest.Model, err)
-		errLine := stats.FormatErrorLine(stats.ErrorLineParams{
-			RequestModel: responsesRequest.Model,
-			ActualModel:  anthropicRequest.Model,
-			StatusCode:   status,
-			Message:      payload.Error.Message,
-		})
-		fmt.Fprintln(logger.Output(), errLine)
-		log.Error("提供商请求失败", "status", status)
+		log.Error("请求失败",
+			"request_model", responsesRequest.Model,
+			"actual_model", anthropicRequest.Model,
+			"status_code", status,
+			"error", payload.Error.Message,
+			"stage", "provider_create_message",
+		)
 		record.Error = traceError("provider_create_message", err)
 		record.OpenAIResponse = payload
 		server.writeTrace(record)
@@ -460,7 +459,6 @@ func (server *Server) handleResponses(writer http.ResponseWriter, request *http.
 			responsesRequest.Model, anthropicRequest.Model, requestStart,
 			zeroUsage("anthropic", "none"), 0, "error", payload.Error.Message,
 		)
-		logger.Flush()
 		return
 	}
 
@@ -497,14 +495,13 @@ func (server *Server) handleStream(writer http.ResponseWriter, request *http.Req
 	stream, err := provider.StreamMessage(request.Context(), anthropicRequest)
 	if err != nil {
 		status, payload := server.bridge.ErrorResponseForModel(responsesRequest.Model, err)
-		errLine := stats.FormatErrorLine(stats.ErrorLineParams{
-			RequestModel: responsesRequest.Model,
-			ActualModel:  anthropicRequest.Model,
-			StatusCode:   status,
-			Message:      payload.Error.Message,
-		})
-		fmt.Fprintln(logger.Output(), errLine)
-		log.Error("提供商流式传输失败", "status", status)
+		log.Error("流式传输失败",
+			"request_model", responsesRequest.Model,
+			"actual_model", anthropicRequest.Model,
+			"status_code", status,
+			"error", payload.Error.Message,
+			"stage", "provider_stream_message",
+		)
 		record.Error = traceError("provider_stream_message", err)
 		record.OpenAIResponse = payload
 		server.writeTrace(record)
@@ -514,7 +511,6 @@ func (server *Server) handleStream(writer http.ResponseWriter, request *http.Req
 			zeroUsage("anthropic", "none"), 0, "error", payload.Error.Message,
 		)
 		server.bridge.ResetCacheWarming(plan)
-		logger.Flush()
 		return
 	}
 	defer stream.Close()
@@ -762,7 +758,6 @@ func (server *Server) handleOpenAIResponse(writer http.ResponseWriter, request *
 		server.writeTrace(record)
 		hookErr = "missing base_url"
 		writeOpenAIError(writer, http.StatusBadGateway, payload)
-		logger.Flush()
 		return
 	}
 
@@ -810,7 +805,6 @@ func (server *Server) handleOpenAIResponse(writer http.ResponseWriter, request *
 		record.OpenAIResponse = payload
 		server.writeTrace(record)
 		writeOpenAIError(writer, http.StatusBadGateway, payload)
-		logger.Flush()
 		return
 	}
 	upstreamReq.Header.Set("Content-Type", "application/json")
@@ -822,14 +816,13 @@ func (server *Server) handleOpenAIResponse(writer http.ResponseWriter, request *
 	}
 	upstreamResp, err := client.Do(upstreamReq)
 	if err != nil {
-		errLine := stats.FormatErrorLine(stats.ErrorLineParams{
-			RequestModel: responsesRequest.Model,
-			ActualModel:  upstreamRequest.Model,
-			StatusCode:   http.StatusBadGateway,
-			Message:      err.Error(),
-		})
-		fmt.Fprintln(logger.Output(), errLine)
-		log.Error("OpenAI 上游请求失败", "status", http.StatusBadGateway)
+		log.Error("OpenAI 上游请求失败",
+			"request_model", responsesRequest.Model,
+			"actual_model", upstreamRequest.Model,
+			"status_code", http.StatusBadGateway,
+			"error", err.Error(),
+			"stage", "openai_upstream",
+		)
 		payload := openai.ErrorResponse{Error: openai.ErrorObject{
 			Message: err.Error(),
 			Type:    "server_error",
@@ -840,7 +833,6 @@ func (server *Server) handleOpenAIResponse(writer http.ResponseWriter, request *
 		record.OpenAIResponse = payload
 		server.writeTrace(record)
 		writeOpenAIError(writer, http.StatusBadGateway, payload)
-		logger.Flush()
 		return
 	}
 	defer upstreamResp.Body.Close()
@@ -920,20 +912,20 @@ func logBillingUsageLine(requestModel, actualModel string, usage stats.BillingUs
 		requestCost = sessionStats.ComputeBillingCost(requestModel, usage)
 		summary = sessionStats.Summary()
 	}
-	fmt.Fprintln(logger.Output(), stats.FormatUsageLine(stats.UsageLineParams{
-		RequestModel:   requestModel,
-		ActualModel:    actualModel,
-		BillingUsage:   usage,
-		RequestCost:    requestCost,
-		TotalCost:      summary.TotalCost,
-		CacheHitRate:   summary.CacheHitRate,
-		CacheWriteRate: summary.CacheWriteRate,
-	}))
-	if sessionStats != nil {
-		fmt.Fprintln(logger.Output(), "---")
-		stats.WriteSummary(logger.Output(), summary)
-	}
-	logger.Flush()
+	rwRatio := stats.BillingCacheRWRatio(usage)
+	logger.Info("请求完成",
+		"request_model", requestModel,
+		"actual_model", actualModel,
+		"input_fresh", usage.FreshInputTokens,
+		"input_cache_read", usage.CacheReadInputTokens,
+		"input_cache_write", usage.CacheCreationInputTokens,
+		"output_tokens", usage.OutputTokens,
+		"request_cost", requestCost,
+		"total_cost", summary.TotalCost,
+		"cache_hit_rate", summary.CacheHitRate,
+		"cache_write_rate", summary.CacheWriteRate,
+		"cache_rw_ratio", rwRatio,
+	)
 }
 
 func openAIUsageFromResponse(data []byte, stream bool) (stats.Usage, openai.Usage, string, bool) {

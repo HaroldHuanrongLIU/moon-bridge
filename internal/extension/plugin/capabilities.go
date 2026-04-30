@@ -173,9 +173,10 @@ type RouteRegistrar interface {
 
 // --- Log pipeline capabilities ---
 
-// LogConsumer is called during LogBuffer.Flush before entries are written.
-// It can inspect, modify, or append log entries. Returned entries replace
-// the original batch for output.
+// LogConsumer is a retained type for plugin interface compatibility.
+// Current status: SUSPENDED — no runtime call site wires data into LogConsumer.
+// Implementing this interface in new plugins is NOT recommended.
+// Data flow will be restored in the future via a slog.Handler adapter.
 type LogConsumer interface {
 	ConsumeLog(ctx *RequestContext, entries []logger.LogEntry) []logger.LogEntry
 }

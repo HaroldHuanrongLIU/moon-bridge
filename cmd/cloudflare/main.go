@@ -92,9 +92,6 @@ func main() {
 
 	defer plugins.ShutdownAll()
 
-	logger.SetConsumeFunc(func(entries []logger.LogEntry) []logger.LogEntry {
-		return plugins.ConsumeGlobalLog(entries)
-	})
 
 	// Initialize persistence layer (db.Registry).
 	ctx := context.Background()

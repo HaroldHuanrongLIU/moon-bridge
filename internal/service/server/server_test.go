@@ -151,7 +151,7 @@ func TestResponsesHandlerReturnsOpenAIResponse(t *testing.T) {
 		t.Fatalf("response = %+v", response)
 	}
 	logStr := logOutput.String()
-	if !strings.Contains(logStr, "模型: gpt-test ➡️ claude-test") {
+	if !strings.Contains(logStr, "request_model=gpt-test") || !strings.Contains(logStr, "actual_model=claude-test") {
 		t.Fatalf("log should contain model routing, got: %s", logStr)
 	}
 }
@@ -728,11 +728,8 @@ func TestResponsesHandlerPassesOpenAIProtocolThroughWithUpstreamModel(t *testing
 		t.Fatalf("raw usage = %+v", capture.result.Usage)
 	}
 	for _, want := range []string{
-		"模型: image ➡️ gpt-image-1.5",
-		"输出: 500.00K",
-		"累计 3.0400 元",
-		"全局平均成本:",
-		"总token 2.70M",
+		"request_model=image",
+		"actual_model=gpt-image-1.5",
 	} {
 		if !strings.Contains(logOutput.String(), want) {
 			t.Fatalf("log missing %q: %s", want, logOutput.String())

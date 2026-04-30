@@ -123,10 +123,6 @@ func runTransform(ctx context.Context, cfg config.Config, errors io.Writer) erro
 	}
 	defer plugins.ShutdownAll()
 
-	// Wire plugin LogConsumer into the log buffer.
-	logger.SetConsumeFunc(func(entries []logger.LogEntry) []logger.LogEntry {
-		return plugins.ConsumeGlobalLog(entries)
-	})
 
 	// Initialize persistence layer (db.Registry).
 	dbRegistry := db.NewRegistry(logger.L())
