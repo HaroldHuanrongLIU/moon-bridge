@@ -32,6 +32,7 @@ type Tool struct {
 	Name               string         `json:"name,omitempty"`
 	Description        string         `json:"description,omitempty"`
 	Parameters         map[string]any `json:"parameters,omitempty"`
+	Strict             *bool          `json:"strict,omitempty"`
 	Format             map[string]any `json:"format,omitempty"`
 	Tools              []Tool         `json:"tools,omitempty"`
 	ExternalWebAccess  *bool          `json:"external_web_access,omitempty"`

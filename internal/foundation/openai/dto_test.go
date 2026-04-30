@@ -80,3 +80,25 @@ func TestResponseJSONIncludesZeroCachedTokensWhenDetailsPresent(t *testing.T) {
 		t.Fatalf("cached_tokens missing from input_tokens_details: %#v", details)
 	}
 }
+
+func TestToolJSONIncludesExplicitStrictFalse(t *testing.T) {
+	strict := false
+	tool := openai.Tool{
+		Type:   "function",
+		Name:   "lookup_weather",
+		Strict: &strict,
+	}
+
+	data, err := json.Marshal(tool)
+	if err != nil {
+		t.Fatalf("Marshal() error = %v", err)
+	}
+
+	var decoded map[string]any
+	if err := json.Unmarshal(data, &decoded); err != nil {
+		t.Fatalf("Unmarshal() error = %v", err)
+	}
+	if value, ok := decoded["strict"]; !ok || value != false {
+		t.Fatalf("strict = %v, present = %v; body = %s", value, ok, data)
+	}
+}

@@ -630,8 +630,9 @@ func TestResponsesHandlerReusesCodexSessionForDeepSeekThinking(t *testing.T) {
 
 func TestResponsesHandlerPassesOpenAIProtocolThroughWithUpstreamModel(t *testing.T) {
 	var upstreamRequest struct {
-		Model string `json:"model"`
-		Input string `json:"input"`
+		Model string           `json:"model"`
+		Input string           `json:"input"`
+		Tools []map[string]any `json:"tools,omitempty"`
 	}
 	httpClient := &http.Client{Transport: roundTripFunc(func(request *http.Request) (*http.Response, error) {
 		if request.URL.Path != "/v1/responses" {
@@ -696,7 +697,7 @@ func TestResponsesHandlerPassesOpenAIProtocolThroughWithUpstreamModel(t *testing
 		PluginRegistry:   registryWithCompletionCapture(t, capture),
 	})
 
-	requestBody := bytes.NewBufferString(`{"model":"image","input":"draw"}`)
+	requestBody := bytes.NewBufferString(`{"model":"image","input":"draw","tools":[{"type":"function","name":"lookup_weather","description":"Lookup weather","parameters":{"type":"object","properties":{}},"strict":false}]}`)
 	recorder := httptest.NewRecorder()
 	request := httptest.NewRequest(http.MethodPost, "/v1/responses", requestBody)
 
@@ -710,6 +711,12 @@ func TestResponsesHandlerPassesOpenAIProtocolThroughWithUpstreamModel(t *testing
 	}
 	if upstreamRequest.Input != "draw" {
 		t.Fatalf("upstream input = %q", upstreamRequest.Input)
+	}
+	if len(upstreamRequest.Tools) != 1 {
+		t.Fatalf("upstream tools = %+v, want one tool", upstreamRequest.Tools)
+	}
+	if value, ok := upstreamRequest.Tools[0]["strict"]; !ok || value != false {
+		t.Fatalf("upstream tool strict = %v, present = %v; tool = %+v", value, ok, upstreamRequest.Tools[0])
 	}
 	summary := sessionStats.Summary()
 	if summary.Requests != 2 || summary.InputTokens != 2_200_000 || summary.CacheRead != 200_000 || summary.OutputTokens != 500_000 {
