@@ -11,17 +11,27 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
+// ---- FileConfig types ----
+
 type FileConfig struct {
-	Mode          string                         `yaml:"mode" json:"mode"`
-	TraceRequests bool                           `yaml:"trace_requests" json:"trace_requests,omitempty"`
-	Log           LogFileConfig                  `yaml:"log" json:"log,omitempty"`
-	Server        ServerFileConfig               `yaml:"server" json:"server,omitempty"`
-	Provider      ProviderFileConfig             `yaml:"provider" json:"provider,omitempty"`
-	Cache         CacheFileConfig                `yaml:"cache" json:"cache,omitempty"`
-	SystemPrompt  string                         `yaml:"system_prompt" json:"system_prompt,omitempty"`
-	Developer     DeveloperFileConfig            `yaml:"developer" json:"developer,omitempty"`
-	Persistence   PersistenceFileConfig          `yaml:"persistence" json:"persistence,omitempty"`
-	Extensions    map[string]ExtensionFileConfig `yaml:"extensions" json:"extensions,omitempty"`
+	Mode          string                           `yaml:"mode"`
+	Trace         TraceFileConfig                  `yaml:"trace,omitempty"`
+	TraceRequests bool                             `yaml:"trace_requests,omitempty"` // backward compat
+	Log           LogFileConfig                    `yaml:"log,omitempty"`
+	Server        ServerFileConfig                 `yaml:"server,omitempty"`
+	Defaults      DefaultsFileConfig               `yaml:"defaults,omitempty"`
+	Models        map[string]ModelDefFileConfig    `yaml:"models,omitempty"`
+	Providers     map[string]ProviderDefFileConfig `yaml:"providers,omitempty"`
+	Routes        map[string]RouteFileConfig       `yaml:"routes,omitempty"`
+	WebSearch     WebSearchFileConfig              `yaml:"web_search,omitempty"`
+	Cache         CacheFileConfig                  `yaml:"cache,omitempty"`
+	Persistence   PersistenceFileConfig            `yaml:"persistence,omitempty"`
+	Extensions    map[string]ExtensionFileConfig   `yaml:"extensions,omitempty"`
+	Proxy         ProxyFileConfig                  `yaml:"proxy,omitempty"`
+}
+
+type TraceFileConfig struct {
+	Enabled bool `yaml:"enabled"`
 }
 
 type ServerFileConfig struct {
@@ -29,65 +39,61 @@ type ServerFileConfig struct {
 	AuthToken string `yaml:"auth_token" json:"auth_token,omitempty"`
 }
 
-type ProviderFileConfig struct {
-	BaseURL          string                           `yaml:"base_url" json:"base_url,omitempty"`
-	APIKey           string                           `yaml:"api_key" json:"api_key,omitempty"`
-	Version          string                           `yaml:"version" json:"version,omitempty"`
-	UserAgent        string                           `yaml:"user_agent" json:"user_agent,omitempty"`
-	WebSearch        WebSearchFileConfig              `yaml:"web_search" json:"web_search,omitempty"`
-	DefaultMaxTokens int                              `yaml:"default_max_tokens" json:"default_max_tokens,omitempty"`
-	DefaultModel     string                           `yaml:"default_model" json:"default_model,omitempty"`
-	Providers        map[string]ProviderDefFileConfig `yaml:"providers" json:"providers,omitempty"`
-	Routes           map[string]RouteFileConfig       `yaml:"routes" json:"routes,omitempty"`
+type LogFileConfig struct {
+	Level  string `yaml:"level" json:"level,omitempty"`
+	Format string `yaml:"format" json:"format,omitempty"`
 }
 
-type CacheFileConfig struct {
-	Mode                     string `yaml:"mode" json:"mode,omitempty"`
-	TTL                      string `yaml:"ttl" json:"ttl,omitempty"`
-	PromptCaching            *bool  `yaml:"prompt_caching" json:"prompt_caching,omitempty"`
-	AutomaticPromptCache     *bool  `yaml:"automatic_prompt_cache" json:"automatic_prompt_cache,omitempty"`
-	ExplicitCacheBreakpoints *bool  `yaml:"explicit_cache_breakpoints" json:"explicit_cache_breakpoints,omitempty"`
-	AllowRetentionDowngrade  *bool  `yaml:"allow_retention_downgrade" json:"allow_retention_downgrade,omitempty"`
-	MaxBreakpoints           int    `yaml:"max_breakpoints" json:"max_breakpoints,omitempty"`
-	MinCacheTokens           int    `yaml:"min_cache_tokens" json:"min_cache_tokens,omitempty"`
-	ExpectedReuse            int    `yaml:"expected_reuse" json:"expected_reuse,omitempty"`
-	MinimumValueScore        int    `yaml:"minimum_value_score" json:"minimum_value_score,omitempty"`
-	MinBreakpointTokens      int    `yaml:"min_breakpoint_tokens" json:"min_breakpoint_tokens,omitempty"`
+type DefaultsFileConfig struct {
+	Model        string `yaml:"model"`
+	MaxTokens    int    `yaml:"max_tokens"`
+	SystemPrompt string `yaml:"system_prompt"`
 }
 
-// ProviderModelFileConfig defines metadata for a model in a provider's catalog.
-// The map key is the upstream model name.
-type ProviderModelFileConfig struct {
-	ContextWindow   int                    `yaml:"context_window" json:"context_window,omitempty"`
-	MaxOutputTokens int                    `yaml:"max_output_tokens" json:"max_output_tokens,omitempty"`
-	Pricing         ModelPricingFileConfig `yaml:"pricing" json:"pricing,omitempty"`
-	// Codex model catalog metadata (injected into /v1/models responses).
-	DisplayName                 string                           `yaml:"display_name" json:"display_name,omitempty"`
-	Description                 string                           `yaml:"description" json:"description,omitempty"`
-	DefaultReasoningLevel       string                           `yaml:"default_reasoning_level" json:"default_reasoning_level,omitempty"`
-	SupportedReasoningLevels    []ReasoningLevelPresetFileConfig `yaml:"supported_reasoning_levels" json:"supported_reasoning_levels,omitempty"`
-	SupportsReasoningSummaries  *bool                            `yaml:"supports_reasoning_summaries" json:"supports_reasoning_summaries,omitempty"`
-	DefaultReasoningSummary     string                           `yaml:"default_reasoning_summary" json:"default_reasoning_summary,omitempty"`
-	InputModalities             []string                         `yaml:"input_modalities" json:"input_modalities,omitempty"`
-	SupportsImageDetailOriginal *bool                            `yaml:"supports_image_detail_original" json:"supports_image_detail_original,omitempty"`
-	WebSearch                   WebSearchFileConfig              `yaml:"web_search" json:"web_search,omitempty"`
-	Extensions                  map[string]ExtensionFileConfig   `yaml:"extensions" json:"extensions,omitempty"`
+type ModelDefFileConfig struct {
+	ContextWindow               int                              `yaml:"context_window,omitempty"`
+	MaxOutputTokens             int                              `yaml:"max_output_tokens,omitempty"`
+	DisplayName                 string                           `yaml:"display_name,omitempty"`
+	Description                 string                           `yaml:"description,omitempty"`
+	BaseInstructions            string                           `yaml:"base_instructions,omitempty"`
+	DefaultReasoningLevel       string                           `yaml:"default_reasoning_level,omitempty"`
+	SupportedReasoningLevels    []ReasoningLevelPresetFileConfig `yaml:"supported_reasoning_levels,omitempty"`
+	SupportsReasoningSummaries  *bool                            `yaml:"supports_reasoning_summaries,omitempty"`
+	DefaultReasoningSummary     string                           `yaml:"default_reasoning_summary,omitempty"`
+	InputModalities             []string                         `yaml:"input_modalities,omitempty"`
+	SupportsImageDetailOriginal *bool                            `yaml:"supports_image_detail_original,omitempty"`
+	WebSearch                   WebSearchFileConfig              `yaml:"web_search,omitempty"`
+	Extensions                  map[string]ExtensionFileConfig   `yaml:"extensions,omitempty"`
+}
+
+type OfferFileConfig struct {
+	Model        string                  `yaml:"model"`
+	UpstreamName string                  `yaml:"upstream_name,omitempty"`
+	Pricing      ModelPricingFileConfig  `yaml:"pricing,omitempty"`
+	Overrides    *ModelDefFileConfig     `yaml:"overrides,omitempty"`
 }
 
 type ProviderDefFileConfig struct {
-	BaseURL    string                             `yaml:"base_url" json:"base_url"`
-	APIKey     string                             `yaml:"api_key" json:"api_key"`
-	Version    string                             `yaml:"version" json:"version,omitempty"`
-	UserAgent  string                             `yaml:"user_agent" json:"user_agent,omitempty"`
-	Protocol   string                             `yaml:"protocol" json:"protocol,omitempty"`
-	WebSearch  WebSearchFileConfig                `yaml:"web_search" json:"web_search,omitempty"`
-	Extensions map[string]ExtensionFileConfig     `yaml:"extensions" json:"extensions,omitempty"`
-	Models     map[string]ProviderModelFileConfig `yaml:"models" json:"models,omitempty"`
+	BaseURL    string                           `yaml:"base_url"`
+	APIKey     string                           `yaml:"api_key"`
+	Version    string                           `yaml:"version,omitempty"`
+	UserAgent  string                           `yaml:"user_agent,omitempty"`
+	Protocol   string                           `yaml:"protocol,omitempty"`
+	Priority   int                              `yaml:"priority,omitempty"`
+	WebSearch  WebSearchFileConfig              `yaml:"web_search,omitempty"`
+	Extensions map[string]ExtensionFileConfig   `yaml:"extensions,omitempty"`
+	Offers     []OfferFileConfig                `yaml:"offers,omitempty"`
 }
 
 type RouteFileConfig struct {
-	To         string                         `yaml:"to" json:"to,omitempty"`
-	Extensions map[string]ExtensionFileConfig `yaml:"extensions" json:"extensions,omitempty"`
+	To            string                           `yaml:"to,omitempty"` // backward compat "provider/model"
+	Model         string                           `yaml:"model,omitempty"`
+	Provider      string                           `yaml:"provider,omitempty"`
+	DisplayName   string                           `yaml:"display_name,omitempty"`
+	Description   string                           `yaml:"description,omitempty"`
+	ContextWindow int                              `yaml:"context_window,omitempty"`
+	WebSearch     WebSearchFileConfig              `yaml:"web_search,omitempty"`
+	Extensions    map[string]ExtensionFileConfig   `yaml:"extensions,omitempty"`
 }
 
 func (cfg *RouteFileConfig) UnmarshalYAML(value *yaml.Node) error {
@@ -102,6 +108,12 @@ func (cfg *RouteFileConfig) UnmarshalYAML(value *yaml.Node) error {
 			return err
 		}
 		*cfg = RouteFileConfig(out)
+		// If To is set and Model/Provider are empty, parse To.
+		if cfg.To != "" && cfg.Model == "" {
+			provider, model := parseRouteSpec(cfg.To)
+			cfg.Provider = provider
+			cfg.Model = model
+		}
 		return nil
 	default:
 		return fmt.Errorf("route must be a string or mapping")
@@ -129,34 +141,37 @@ type WebSearchFileConfig struct {
 	SearchMaxRounds int    `yaml:"search_max_rounds" json:"search_max_rounds,omitempty"`
 }
 
-type DeveloperFileConfig struct {
-	Proxy DeveloperProxyFileConfig `yaml:"proxy" json:"proxy,omitempty"`
-}
-
-type DeveloperProxyFileConfig struct {
-	Response  ProxyFileConfig `yaml:"response" json:"response,omitempty"`
-	Anthropic ProxyFileConfig `yaml:"anthropic" json:"anthropic,omitempty"`
-}
-
-type ProxyFileConfig struct {
-	Model    string                  `yaml:"model" json:"model,omitempty"`
-	Provider ProxyProviderFileConfig `yaml:"provider" json:"provider,omitempty"`
-}
-
-type ProxyProviderFileConfig struct {
-	BaseURL string `yaml:"base_url" json:"base_url,omitempty"`
-	APIKey  string `yaml:"api_key" json:"api_key,omitempty"`
-	Version string `yaml:"version" json:"version,omitempty"`
-}
-
 type PersistenceFileConfig struct {
 	ActiveProvider string `yaml:"active_provider" json:"active_provider,omitempty"`
 }
 
-type LogFileConfig struct {
-	Level  string `yaml:"level" json:"level,omitempty"`
-	Format string `yaml:"format" json:"format,omitempty"`
+type CacheFileConfig struct {
+	Mode                     string `yaml:"mode" json:"mode,omitempty"`
+	TTL                      string `yaml:"ttl" json:"ttl,omitempty"`
+	PromptCaching            *bool  `yaml:"prompt_caching" json:"prompt_caching,omitempty"`
+	AutomaticPromptCache     *bool  `yaml:"automatic_prompt_cache" json:"automatic_prompt_cache,omitempty"`
+	ExplicitCacheBreakpoints *bool  `yaml:"explicit_cache_breakpoints" json:"explicit_cache_breakpoints,omitempty"`
+	AllowRetentionDowngrade  *bool  `yaml:"allow_retention_downgrade" json:"allow_retention_downgrade,omitempty"`
+	MaxBreakpoints           int    `yaml:"max_breakpoints" json:"max_breakpoints,omitempty"`
+	MinCacheTokens           int    `yaml:"min_cache_tokens" json:"min_cache_tokens,omitempty"`
+	ExpectedReuse            int    `yaml:"expected_reuse" json:"expected_reuse,omitempty"`
+	MinimumValueScore        int    `yaml:"minimum_value_score" json:"minimum_value_score,omitempty"`
+	MinBreakpointTokens      int    `yaml:"min_breakpoint_tokens" json:"min_breakpoint_tokens,omitempty"`
 }
+
+type ProxyFileConfig struct {
+	Response  ProxyTargetFileConfig `yaml:"response,omitempty"`
+	Anthropic ProxyTargetFileConfig `yaml:"anthropic,omitempty"`
+}
+
+type ProxyTargetFileConfig struct {
+	BaseURL string `yaml:"base_url"`
+	APIKey  string `yaml:"api_key"`
+	Model   string `yaml:"model,omitempty"`
+	Version string `yaml:"version,omitempty"`
+}
+
+// ---- Loading functions ----
 
 func LoadFromFile(path string) (Config, error) {
 	return LoadFromFileWithOptions(path, LoadOptions{})
@@ -178,8 +193,7 @@ func LoadFromFileWithOptions(path string, opts LoadOptions) (Config, error) {
 	return cfg, nil
 }
 
-// LoadFromYAML parses YAML bytes into a Config. Unlike LoadFromFile, it does
-// processes the inline plugins: section of the provided YAML content.
+// LoadFromYAML parses YAML bytes into a Config.
 func LoadFromYAML(data []byte) (Config, error) {
 	return LoadFromYAMLWithOptions(data, LoadOptions{})
 }
@@ -234,77 +248,474 @@ func FromFileConfigWithOptions(fileConfig FileConfig, opts LoadOptions) (Config,
 	if err != nil {
 		return Config{}, err
 	}
-	webSearchSupport, err := parseWebSearchSupport(fileConfig.Provider.WebSearch.Support)
+
+	// Trace: prefer new trace.enabled, fall back to old trace_requests.
+	traceEnabled := fileConfig.Trace.Enabled || fileConfig.TraceRequests
+
+	// Web search: top-level or default.
+	webSearchSupport, err := parseWebSearchSupport(fileConfig.WebSearch.Support)
 	if err != nil {
 		return Config{}, err
 	}
+
+	// Defaults.
+	defaults := Defaults{
+		Model:        strings.TrimSpace(fileConfig.Defaults.Model),
+		MaxTokens:    fileConfig.Defaults.MaxTokens,
+		SystemPrompt: strings.TrimSpace(fileConfig.Defaults.SystemPrompt),
+	}
+
+	// Models (top-level).
+	models, err := fromModelDefFileConfig(fileConfig.Models, specs)
+	if err != nil {
+		return Config{}, err
+	}
+
+	// Top-level extensions.
 	topExtensions, err := decodeExtensionSettings("config", ExtensionScopeGlobal, fileConfig.Extensions, specs)
 	if err != nil {
 		return Config{}, err
 	}
-	providerDefs, err := fromProviderDefFileConfig(fileConfig.Provider.Providers, specs)
-	if err != nil {
-		return Config{}, err
-	}
-	routes, err := buildRoutes(fileConfig.Provider.Routes, providerDefs, specs)
+
+	// Providers (top-level, no longer under provider.providers).
+	providerDefs, err := fromProviderDefFileConfig(fileConfig.Providers, specs, models)
 	if err != nil {
 		return Config{}, err
 	}
 
-	legacyBaseURL := strings.TrimRight(strings.TrimSpace(fileConfig.Provider.BaseURL), "/")
-	legacyAPIKey := strings.TrimSpace(fileConfig.Provider.APIKey)
-	legacyVersion := valueOrDefault(strings.TrimSpace(fileConfig.Provider.Version), "2023-06-01")
-	legacyUserAgent := strings.TrimSpace(fileConfig.Provider.UserAgent)
+	// Routes.
+	routes, err := buildRoutes(fileConfig.Routes, providerDefs, models, specs)
+	if err != nil {
+		return Config{}, err
+	}
+
+	// Proxy (flattened, replaces developer.proxy).
+	responseProxy := FromResponseProxyFileConfig(fileConfig.Proxy.Response)
+	anthropicProxy := FromAnthropicProxyFileConfig(fileConfig.Proxy.Anthropic)
 
 	cfg := Config{
-		Mode:              mode,
-		Addr:              valueOrDefault(strings.TrimSpace(fileConfig.Server.Addr), DefaultAddr),
-		AuthToken:         strings.TrimSpace(fileConfig.Server.AuthToken),
-		TraceRequests:     fileConfig.TraceRequests,
-		LogLevel:          valueOrDefault(strings.TrimSpace(fileConfig.Log.Level), "info"),
-		LogFormat:         valueOrDefault(strings.TrimSpace(fileConfig.Log.Format), "text"),
-		SystemPrompt:      strings.TrimSpace(fileConfig.SystemPrompt),
-		DefaultModel:      strings.TrimSpace(fileConfig.Provider.DefaultModel),
-		ProviderBaseURL:   legacyBaseURL,
-		ProviderAPIKey:    legacyAPIKey,
-		ProviderVersion:   legacyVersion,
-		ProviderUserAgent: legacyUserAgent,
-		WebSearchSupport:  webSearchSupport,
-		WebSearchMaxUses:  intOrDefault(fileConfig.Provider.WebSearch.MaxUses, 8),
-		TavilyAPIKey:      strings.TrimSpace(fileConfig.Provider.WebSearch.TavilyAPIKey),
-		FirecrawlAPIKey:   strings.TrimSpace(fileConfig.Provider.WebSearch.FirecrawlAPIKey),
-		SearchMaxRounds:   intOrDefault(fileConfig.Provider.WebSearch.SearchMaxRounds, 5),
-		DefaultMaxTokens:  intOrDefault(fileConfig.Provider.DefaultMaxTokens, 1024),
-		Routes:            routes,
-		ProviderDefs:      providerDefs,
-		Cache:             fromCacheFileConfig(fileConfig.Cache),
-		Persistence:       FromPersistenceFileConfig(fileConfig.Persistence),
-		ResponseProxy:     FromResponseProxyFileConfig(fileConfig.Developer.Proxy.Response),
-		AnthropicProxy:    FromAnthropicProxyFileConfig(fileConfig.Developer.Proxy.Anthropic),
-		Extensions:        topExtensions,
-		extensionSpecs:    specs,
-	}
-
-	// In multi-provider mode, derive ProviderBaseURL/ProviderAPIKey from the
-	// configured providers for backward-compatible lookup.
-	if len(cfg.ProviderDefs) > 0 {
-		if def, ok := cfg.ProviderDefs["default"]; ok && def.BaseURL != "" {
-			cfg.ProviderBaseURL = def.BaseURL
-			cfg.ProviderAPIKey = def.APIKey
-			cfg.ProviderVersion = def.Version
-		} else if len(cfg.ProviderDefs) == 1 {
-			for _, def := range cfg.ProviderDefs {
-				cfg.ProviderBaseURL = def.BaseURL
-				cfg.ProviderAPIKey = def.APIKey
-				cfg.ProviderVersion = def.Version
-			}
-		}
+		Mode:             mode,
+		Addr:             valueOrDefault(strings.TrimSpace(fileConfig.Server.Addr), DefaultAddr),
+		AuthToken:        strings.TrimSpace(fileConfig.Server.AuthToken),
+		TraceRequests:    traceEnabled,
+		LogLevel:         valueOrDefault(strings.TrimSpace(fileConfig.Log.Level), "info"),
+		LogFormat:        valueOrDefault(strings.TrimSpace(fileConfig.Log.Format), "text"),
+		SystemPrompt:     defaults.SystemPrompt,
+		DefaultModel:     defaults.Model,
+		Defaults:         defaults,
+		Models:           models,
+		Routes:           routes,
+		ProviderDefs:     providerDefs,
+		WebSearchSupport: webSearchSupport,
+		WebSearchMaxUses: intOrDefault(fileConfig.WebSearch.MaxUses, 8),
+		TavilyAPIKey:     strings.TrimSpace(fileConfig.WebSearch.TavilyAPIKey),
+		FirecrawlAPIKey:  strings.TrimSpace(fileConfig.WebSearch.FirecrawlAPIKey),
+		SearchMaxRounds:  intOrDefault(fileConfig.WebSearch.SearchMaxRounds, 5),
+		DefaultMaxTokens: intOrDefault(defaults.MaxTokens, 1024),
+		Cache:            fromCacheFileConfig(fileConfig.Cache),
+		Persistence:      FromPersistenceFileConfig(fileConfig.Persistence),
+		ResponseProxy:    responseProxy,
+		AnthropicProxy:   anthropicProxy,
+		Extensions:       topExtensions,
+		extensionSpecs:   specs,
 	}
 
 	if err := cfg.Validate(); err != nil {
 		return Config{}, err
 	}
 	return cfg, nil
+}
+
+// ---- Conversion helpers ----
+
+func fromModelDefFileConfig(fileConfig map[string]ModelDefFileConfig, specs extensionSpecIndex) (map[string]ModelDef, error) {
+	if len(fileConfig) == 0 {
+		return nil, nil
+	}
+	models := make(map[string]ModelDef, len(fileConfig))
+	for slug, m := range fileConfig {
+		trimmedSlug := strings.TrimSpace(slug)
+		if trimmedSlug == "" {
+			continue
+		}
+		modelExtensions, err := decodeExtensionSettings("models."+trimmedSlug, ExtensionScopeModel, m.Extensions, specs)
+		if err != nil {
+			return nil, err
+		}
+		ws := WebSearchConfig{}
+		if m.WebSearch.Support != "" {
+			wsSupport, _ := parseWebSearchSupport(m.WebSearch.Support)
+			ws = WebSearchConfig{
+				Support:         wsSupport,
+				MaxUses:         m.WebSearch.MaxUses,
+				TavilyAPIKey:    strings.TrimSpace(m.WebSearch.TavilyAPIKey),
+				FirecrawlAPIKey: strings.TrimSpace(m.WebSearch.FirecrawlAPIKey),
+				SearchMaxRounds: m.WebSearch.SearchMaxRounds,
+			}
+		}
+		var reasoningPresets []ReasoningLevelPreset
+		for _, p := range m.SupportedReasoningLevels {
+			reasoningPresets = append(reasoningPresets, ReasoningLevelPreset{
+				Effort:      strings.TrimSpace(p.Effort),
+				Description: strings.TrimSpace(p.Description),
+			})
+		}
+		models[trimmedSlug] = ModelDef{
+			ContextWindow:               m.ContextWindow,
+			MaxOutputTokens:             m.MaxOutputTokens,
+			DisplayName:                 strings.TrimSpace(m.DisplayName),
+			Description:                 strings.TrimSpace(m.Description),
+			BaseInstructions:            strings.TrimSpace(m.BaseInstructions),
+			DefaultReasoningLevel:       strings.TrimSpace(m.DefaultReasoningLevel),
+			SupportedReasoningLevels:    reasoningPresets,
+			SupportsReasoningSummaries:  boolOrDefault(m.SupportsReasoningSummaries, false),
+			DefaultReasoningSummary:     strings.TrimSpace(m.DefaultReasoningSummary),
+			InputModalities:             m.InputModalities,
+			SupportsImageDetailOriginal: boolOrDefault(m.SupportsImageDetailOriginal, false),
+			WebSearch:                   ws,
+			Extensions:                  modelExtensions,
+		}
+	}
+	return models, nil
+}
+
+func fromProviderDefFileConfig(fileConfig map[string]ProviderDefFileConfig, specs extensionSpecIndex, models map[string]ModelDef) (map[string]ProviderDef, error) {
+	if len(fileConfig) == 0 {
+		return nil, nil
+	}
+	defs := make(map[string]ProviderDef, len(fileConfig))
+	for key, def := range fileConfig {
+		trimmedKey := strings.TrimSpace(key)
+		if trimmedKey == "" {
+			continue
+		}
+		wsSupport, _ := parseWebSearchSupport(def.WebSearch.Support)
+		providerExtensions, err := decodeExtensionSettings("providers."+trimmedKey, ExtensionScopeProvider, def.Extensions, specs)
+		if err != nil {
+			return nil, err
+		}
+
+		// Build Offers.
+		offers := make([]OfferEntry, 0, len(def.Offers))
+		for _, offer := range def.Offers {
+			trimmedModel := strings.TrimSpace(offer.Model)
+			if trimmedModel == "" {
+				continue
+			}
+			entry := OfferEntry{
+				Model:        trimmedModel,
+				UpstreamName: strings.TrimSpace(offer.UpstreamName),
+				Pricing: ModelPricing{
+					InputPrice:      offer.Pricing.InputPrice,
+					OutputPrice:     offer.Pricing.OutputPrice,
+					CacheWritePrice: offer.Pricing.CacheWritePrice,
+					CacheReadPrice:  offer.Pricing.CacheReadPrice,
+				},
+			}
+			// Handle overrides: merge model def with overrides.
+			if offer.Overrides != nil {
+				base := ModelDef{}
+				if m, ok := models[trimmedModel]; ok {
+					base = m
+				}
+				merged := mergeModelDefOverrides(base, *offer.Overrides)
+				entry.Overrides = &merged
+			}
+			offers = append(offers, entry)
+		}
+
+		// Build ProviderDef.Models from offers + model defs (backward compat).
+		providerModels := make(map[string]ModelMeta, len(offers))
+		for _, offer := range offers {
+			upstreamName := offer.UpstreamName
+			if upstreamName == "" {
+				upstreamName = offer.Model
+			}
+			modelDef, ok := models[offer.Model]
+			if !ok {
+				// Model not defined in top-level models; skip metadata.
+				providerModels[upstreamName] = ModelMeta{
+					InputPrice:      offer.Pricing.InputPrice,
+					OutputPrice:     offer.Pricing.OutputPrice,
+					CacheWritePrice: offer.Pricing.CacheWritePrice,
+					CacheReadPrice:  offer.Pricing.CacheReadPrice,
+				}
+				continue
+			}
+			meta := ModelMeta{
+				ContextWindow:               modelDef.ContextWindow,
+				MaxOutputTokens:             modelDef.MaxOutputTokens,
+				InputPrice:                  offer.Pricing.InputPrice,
+				OutputPrice:                 offer.Pricing.OutputPrice,
+				CacheWritePrice:             offer.Pricing.CacheWritePrice,
+				CacheReadPrice:              offer.Pricing.CacheReadPrice,
+				DisplayName:                 modelDef.DisplayName,
+				Description:                 modelDef.Description,
+				BaseInstructions:            modelDef.BaseInstructions,
+				DefaultReasoningLevel:       modelDef.DefaultReasoningLevel,
+				SupportedReasoningLevels:    modelDef.SupportedReasoningLevels,
+				SupportsReasoningSummaries:  modelDef.SupportsReasoningSummaries,
+				DefaultReasoningSummary:     modelDef.DefaultReasoningSummary,
+				InputModalities:             modelDef.InputModalities,
+				SupportsImageDetailOriginal: modelDef.SupportsImageDetailOriginal,
+				WebSearch:                   modelDef.WebSearch,
+				Extensions:                  modelDef.Extensions,
+			}
+			// Apply offer overrides.
+			if offer.Overrides != nil {
+				applyModelOverrides(&meta, *offer.Overrides)
+			}
+			providerModels[upstreamName] = meta
+		}
+
+		pd := ProviderDef{
+			BaseURL:          strings.TrimRight(strings.TrimSpace(def.BaseURL), "/"),
+			APIKey:           strings.TrimSpace(def.APIKey),
+			Version:          valueOrDefault(strings.TrimSpace(def.Version), "2023-06-01"),
+			UserAgent:        strings.TrimSpace(def.UserAgent),
+			Protocol:         strings.TrimSpace(def.Protocol),
+			Priority:         def.Priority,
+			WebSearchSupport: wsSupport,
+			WebSearchMaxUses: def.WebSearch.MaxUses,
+			TavilyAPIKey:     strings.TrimSpace(def.WebSearch.TavilyAPIKey),
+			FirecrawlAPIKey:  strings.TrimSpace(def.WebSearch.FirecrawlAPIKey),
+			SearchMaxRounds:  def.WebSearch.SearchMaxRounds,
+			Extensions:       providerExtensions,
+			Models:           providerModels,
+			Offers:           offers,
+		}
+		defs[trimmedKey] = pd
+	}
+	return defs, nil
+}
+
+// mergeModelDefOverrides applies ModelDefFileConfig overrides on top of a base ModelDef.
+func mergeModelDefOverrides(base ModelDef, override ModelDefFileConfig) ModelDef {
+	out := base
+	if override.ContextWindow > 0 {
+		out.ContextWindow = override.ContextWindow
+	}
+	if override.MaxOutputTokens > 0 {
+		out.MaxOutputTokens = override.MaxOutputTokens
+	}
+	if v := strings.TrimSpace(override.DisplayName); v != "" {
+		out.DisplayName = v
+	}
+	if v := strings.TrimSpace(override.Description); v != "" {
+		out.Description = v
+	}
+	if v := strings.TrimSpace(override.BaseInstructions); v != "" {
+		out.BaseInstructions = v
+	}
+	if v := strings.TrimSpace(override.DefaultReasoningLevel); v != "" {
+		out.DefaultReasoningLevel = v
+	}
+	if len(override.SupportedReasoningLevels) > 0 {
+		var presets []ReasoningLevelPreset
+		for _, p := range override.SupportedReasoningLevels {
+			presets = append(presets, ReasoningLevelPreset{
+				Effort:      strings.TrimSpace(p.Effort),
+				Description: strings.TrimSpace(p.Description),
+			})
+		}
+		out.SupportedReasoningLevels = presets
+	}
+	if override.SupportsReasoningSummaries != nil {
+		out.SupportsReasoningSummaries = *override.SupportsReasoningSummaries
+	}
+	if v := strings.TrimSpace(override.DefaultReasoningSummary); v != "" {
+		out.DefaultReasoningSummary = v
+	}
+	if override.InputModalities != nil {
+		out.InputModalities = override.InputModalities
+	}
+	if override.SupportsImageDetailOriginal != nil {
+		out.SupportsImageDetailOriginal = *override.SupportsImageDetailOriginal
+	}
+	if override.WebSearch.Support != "" {
+		wsSupport, _ := parseWebSearchSupport(override.WebSearch.Support)
+		out.WebSearch = WebSearchConfig{
+			Support:         wsSupport,
+			MaxUses:         override.WebSearch.MaxUses,
+			TavilyAPIKey:    strings.TrimSpace(override.WebSearch.TavilyAPIKey),
+			FirecrawlAPIKey: strings.TrimSpace(override.WebSearch.FirecrawlAPIKey),
+			SearchMaxRounds: override.WebSearch.SearchMaxRounds,
+		}
+	}
+	if override.Extensions != nil {
+		if out.Extensions == nil {
+			out.Extensions = make(map[string]ExtensionSettings)
+		}
+		for k, v := range override.Extensions {
+			enabled := v.Enabled
+			out.Extensions[k] = ExtensionSettings{
+				Enabled:   enabled,
+				RawConfig: cloneAnyMap(v.Config),
+			}
+		}
+	}
+	return out
+}
+
+// applyModelOverrides applies ModelDef overrides to a ModelMeta.
+func applyModelOverrides(meta *ModelMeta, override ModelDef) {
+	if override.ContextWindow > 0 {
+		meta.ContextWindow = override.ContextWindow
+	}
+	if override.MaxOutputTokens > 0 {
+		meta.MaxOutputTokens = override.MaxOutputTokens
+	}
+	if v := strings.TrimSpace(override.DisplayName); v != "" {
+		meta.DisplayName = v
+	}
+	if v := strings.TrimSpace(override.Description); v != "" {
+		meta.Description = v
+	}
+	if v := strings.TrimSpace(override.BaseInstructions); v != "" {
+		meta.BaseInstructions = v
+	}
+	if v := strings.TrimSpace(override.DefaultReasoningLevel); v != "" {
+		meta.DefaultReasoningLevel = v
+	}
+	if len(override.SupportedReasoningLevels) > 0 {
+		meta.SupportedReasoningLevels = override.SupportedReasoningLevels
+	}
+	// Note: for bool fields we only override when true because ModelDef uses
+	// plain bool (not *bool), so we can't distinguish "unset" from "false".
+	if override.SupportsReasoningSummaries {
+		meta.SupportsReasoningSummaries = true
+	}
+	if v := strings.TrimSpace(override.DefaultReasoningSummary); v != "" {
+		meta.DefaultReasoningSummary = v
+	}
+	if len(override.InputModalities) > 0 {
+		meta.InputModalities = override.InputModalities
+	}
+	if override.SupportsImageDetailOriginal {
+		meta.SupportsImageDetailOriginal = true
+	}
+}
+
+// buildRoutes parses route specs and merges model metadata.
+func buildRoutes(rawRoutes map[string]RouteFileConfig, providerDefs map[string]ProviderDef, models map[string]ModelDef, specs extensionSpecIndex) (map[string]RouteEntry, error) {
+	if len(rawRoutes) == 0 {
+		return nil, nil
+	}
+	routes := make(map[string]RouteEntry, len(rawRoutes))
+	for alias, routeCfg := range rawRoutes {
+		trimmedAlias := strings.TrimSpace(alias)
+		if trimmedAlias == "" {
+			continue
+		}
+
+		// Resolve model slug and provider key.
+		modelSlug := strings.TrimSpace(routeCfg.Model)
+		providerKey := strings.TrimSpace(routeCfg.Provider)
+
+		// Backward compat: if To is set and model is empty, parse it.
+		if modelSlug == "" && routeCfg.To != "" {
+			providerKey, modelSlug = parseRouteSpec(routeCfg.To)
+		}
+		if modelSlug == "" {
+			return nil, fmt.Errorf("routes.%s: model is required", trimmedAlias)
+		}
+
+		// If no provider specified, find the first provider that offers this model.
+		if providerKey == "" {
+			for pk, def := range providerDefs {
+				for _, offer := range def.Offers {
+					if offer.Model == modelSlug {
+						providerKey = pk
+						break
+					}
+				}
+				if providerKey != "" {
+					break
+				}
+			}
+		}
+
+		routeExtensions, err := decodeExtensionSettings("routes."+trimmedAlias, ExtensionScopeRoute, routeCfg.Extensions, specs)
+		if err != nil {
+			return nil, err
+		}
+
+		entry := RouteEntry{
+			Provider:   providerKey,
+			Model:      modelSlug, // will be overridden with upstream name below
+			Extensions: routeExtensions,
+		}
+
+		// Look up upstream model name from provider offer.
+		if providerKey != "" {
+			if def, ok := providerDefs[providerKey]; ok {
+				for _, offer := range def.Offers {
+					if offer.Model == modelSlug {
+						if offer.UpstreamName != "" {
+							entry.Model = offer.UpstreamName
+						}
+						entry.InputPrice = offer.Pricing.InputPrice
+						entry.OutputPrice = offer.Pricing.OutputPrice
+						entry.CacheWritePrice = offer.Pricing.CacheWritePrice
+						entry.CacheReadPrice = offer.Pricing.CacheReadPrice
+						break
+					}
+				}
+			}
+		}
+
+		// Merge model def metadata into route entry.
+		if modelDef, ok := models[modelSlug]; ok {
+			entry.ContextWindow = modelDef.ContextWindow
+			entry.MaxOutputTokens = modelDef.MaxOutputTokens
+			entry.DisplayName = modelDef.DisplayName
+			entry.Description = modelDef.Description
+			entry.BaseInstructions = modelDef.BaseInstructions
+			entry.DefaultReasoningLevel = modelDef.DefaultReasoningLevel
+			entry.SupportedReasoningLevels = modelDef.SupportedReasoningLevels
+			entry.SupportsReasoningSummaries = modelDef.SupportsReasoningSummaries
+			entry.DefaultReasoningSummary = modelDef.DefaultReasoningSummary
+			entry.InputModalities = modelDef.InputModalities
+			entry.SupportsImageDetailOriginal = modelDef.SupportsImageDetailOriginal
+			entry.WebSearch = modelDef.WebSearch
+		}
+
+		// Route-level overrides.
+		if routeCfg.DisplayName != "" {
+			entry.DisplayName = strings.TrimSpace(routeCfg.DisplayName)
+		}
+		if routeCfg.Description != "" {
+			entry.Description = strings.TrimSpace(routeCfg.Description)
+		}
+		if routeCfg.ContextWindow > 0 {
+			entry.ContextWindow = routeCfg.ContextWindow
+		}
+		if routeCfg.WebSearch.Support != "" {
+			wsSupport, _ := parseWebSearchSupport(routeCfg.WebSearch.Support)
+			entry.WebSearch = WebSearchConfig{
+				Support:         wsSupport,
+				MaxUses:         routeCfg.WebSearch.MaxUses,
+				TavilyAPIKey:    strings.TrimSpace(routeCfg.WebSearch.TavilyAPIKey),
+				FirecrawlAPIKey: strings.TrimSpace(routeCfg.WebSearch.FirecrawlAPIKey),
+				SearchMaxRounds: routeCfg.WebSearch.SearchMaxRounds,
+			}
+		}
+
+		routes[trimmedAlias] = entry
+	}
+	return routes, nil
+}
+
+// parseRouteSpec splits "provider/model" into (provider, model).
+// If no slash is present, the whole string is treated as the model name
+// with provider defaulting to "default".
+func parseRouteSpec(spec string) (string, string) {
+	spec = strings.TrimSpace(spec)
+	slash := strings.IndexByte(spec, '/')
+	if slash < 0 {
+		return "default", spec
+	}
+	return strings.TrimSpace(spec[:slash]), strings.TrimSpace(spec[slash+1:])
 }
 
 func parseMode(value string) (Mode, error) {
@@ -325,15 +736,24 @@ func parseWebSearchSupport(value string) (WebSearchSupport, error) {
 	case WebSearchSupportAuto, WebSearchSupportEnabled, WebSearchSupportDisabled, WebSearchSupportInjected:
 		return support, nil
 	default:
-		return "", fmt.Errorf("invalid provider.web_search.support %q", value)
+		return "", fmt.Errorf("invalid web_search.support %q", value)
 	}
 }
 
-func FromResponseProxyFileConfig(fileConfig ProxyFileConfig) ResponseProxyConfig {
+func FromResponseProxyFileConfig(fileConfig ProxyTargetFileConfig) ResponseProxyConfig {
 	return ResponseProxyConfig{
 		Model:           strings.TrimSpace(fileConfig.Model),
-		ProviderBaseURL: strings.TrimRight(strings.TrimSpace(fileConfig.Provider.BaseURL), "/"),
-		ProviderAPIKey:  strings.TrimSpace(fileConfig.Provider.APIKey),
+		ProviderBaseURL: strings.TrimRight(strings.TrimSpace(fileConfig.BaseURL), "/"),
+		ProviderAPIKey:  strings.TrimSpace(fileConfig.APIKey),
+	}
+}
+
+func FromAnthropicProxyFileConfig(fileConfig ProxyTargetFileConfig) AnthropicProxyConfig {
+	return AnthropicProxyConfig{
+		Model:           strings.TrimSpace(fileConfig.Model),
+		ProviderBaseURL: strings.TrimRight(strings.TrimSpace(fileConfig.BaseURL), "/"),
+		ProviderAPIKey:  strings.TrimSpace(fileConfig.APIKey),
+		ProviderVersion: valueOrDefault(strings.TrimSpace(fileConfig.Version), "2023-06-01"),
 	}
 }
 
@@ -341,148 +761,6 @@ func FromPersistenceFileConfig(fileConfig PersistenceFileConfig) PersistenceConf
 	return PersistenceConfig{
 		ActiveProvider: strings.TrimSpace(fileConfig.ActiveProvider),
 	}
-}
-
-func FromAnthropicProxyFileConfig(fileConfig ProxyFileConfig) AnthropicProxyConfig {
-	return AnthropicProxyConfig{
-		Model:           strings.TrimSpace(fileConfig.Model),
-		ProviderBaseURL: strings.TrimRight(strings.TrimSpace(fileConfig.Provider.BaseURL), "/"),
-		ProviderAPIKey:  strings.TrimSpace(fileConfig.Provider.APIKey),
-		ProviderVersion: valueOrDefault(strings.TrimSpace(fileConfig.Provider.Version), "2023-06-01"),
-	}
-}
-
-// buildRoutes parses the "provider/model" route specs and merges model metadata
-// from provider definitions.
-func buildRoutes(rawRoutes map[string]RouteFileConfig, providerDefs map[string]ProviderDef, specs extensionSpecIndex) (map[string]RouteEntry, error) {
-	if len(rawRoutes) == 0 {
-		return nil, nil
-	}
-	routes := make(map[string]RouteEntry, len(rawRoutes))
-	for alias, routeCfg := range rawRoutes {
-		trimmedAlias := strings.TrimSpace(alias)
-		if trimmedAlias == "" {
-			continue
-		}
-		providerKey, modelName := parseRouteSpec(routeCfg.To)
-		routeExtensions, err := decodeExtensionSettings("provider.routes."+trimmedAlias, ExtensionScopeRoute, routeCfg.Extensions, specs)
-		if err != nil {
-			return nil, err
-		}
-		entry := RouteEntry{
-			Provider:   providerKey,
-			Model:      modelName,
-			Extensions: routeExtensions,
-		}
-		// Merge metadata from provider's model catalog if available.
-		if def, ok := providerDefs[providerKey]; ok {
-			if meta, ok := def.Models[modelName]; ok {
-				entry.ContextWindow = meta.ContextWindow
-				entry.MaxOutputTokens = meta.MaxOutputTokens
-				entry.InputPrice = meta.InputPrice
-				entry.OutputPrice = meta.OutputPrice
-				entry.CacheWritePrice = meta.CacheWritePrice
-				entry.CacheReadPrice = meta.CacheReadPrice
-				entry.DefaultReasoningLevel = meta.DefaultReasoningLevel
-				entry.SupportedReasoningLevels = meta.SupportedReasoningLevels
-				entry.SupportsReasoningSummaries = meta.SupportsReasoningSummaries
-				entry.DefaultReasoningSummary = meta.DefaultReasoningSummary
-				entry.WebSearch = meta.WebSearch
-				entry.InputModalities = meta.InputModalities
-				entry.SupportsImageDetailOriginal = meta.SupportsImageDetailOriginal
-			}
-		}
-		routes[trimmedAlias] = entry
-	}
-	return routes, nil
-}
-
-// parseRouteSpec splits "provider/model" into (provider, model).
-// If no slash is present, the whole string is treated as the model name
-// with provider defaulting to "default".
-func parseRouteSpec(spec string) (string, string) {
-	spec = strings.TrimSpace(spec)
-	slash := strings.IndexByte(spec, '/')
-	if slash < 0 {
-		return "default", spec
-	}
-	return strings.TrimSpace(spec[:slash]), strings.TrimSpace(spec[slash+1:])
-}
-
-func fromProviderDefFileConfig(fileConfig map[string]ProviderDefFileConfig, specs extensionSpecIndex) (map[string]ProviderDef, error) {
-	if len(fileConfig) == 0 {
-		return nil, nil
-	}
-	defs := make(map[string]ProviderDef, len(fileConfig))
-	for key, def := range fileConfig {
-		trimmedKey := strings.TrimSpace(key)
-		if trimmedKey == "" {
-			continue
-		}
-		wsSupport, _ := parseWebSearchSupport(def.WebSearch.Support)
-		providerExtensions, err := decodeExtensionSettings("provider.providers."+trimmedKey, ExtensionScopeProvider, def.Extensions, specs)
-		if err != nil {
-			return nil, err
-		}
-		models := make(map[string]ModelMeta, len(def.Models))
-		for name, m := range def.Models {
-			trimmedName := strings.TrimSpace(name)
-			modelExtensions, err := decodeExtensionSettings("provider.providers."+trimmedKey+".models."+trimmedName, ExtensionScopeModel, m.Extensions, specs)
-			if err != nil {
-				return nil, err
-			}
-			meta := ModelMeta{
-				ContextWindow:               m.ContextWindow,
-				MaxOutputTokens:             m.MaxOutputTokens,
-				InputPrice:                  m.Pricing.InputPrice,
-				OutputPrice:                 m.Pricing.OutputPrice,
-				CacheWritePrice:             m.Pricing.CacheWritePrice,
-				CacheReadPrice:              m.Pricing.CacheReadPrice,
-				DisplayName:                 strings.TrimSpace(m.DisplayName),
-				Description:                 strings.TrimSpace(m.Description),
-				DefaultReasoningLevel:       strings.TrimSpace(m.DefaultReasoningLevel),
-				SupportsReasoningSummaries:  boolOrDefault(m.SupportsReasoningSummaries, false),
-				DefaultReasoningSummary:     strings.TrimSpace(m.DefaultReasoningSummary),
-				Extensions:                  modelExtensions,
-				InputModalities:             m.InputModalities,
-				SupportsImageDetailOriginal: boolOrDefault(m.SupportsImageDetailOriginal, false),
-			}
-			// Parse model-level web_search config.
-			if m.WebSearch.Support != "" {
-				modelWS, _ := parseWebSearchSupport(m.WebSearch.Support)
-				meta.WebSearch = WebSearchConfig{
-					Support:         modelWS,
-					MaxUses:         m.WebSearch.MaxUses,
-					TavilyAPIKey:    strings.TrimSpace(m.WebSearch.TavilyAPIKey),
-					FirecrawlAPIKey: strings.TrimSpace(m.WebSearch.FirecrawlAPIKey),
-					SearchMaxRounds: m.WebSearch.SearchMaxRounds,
-				}
-			}
-			for _, preset := range m.SupportedReasoningLevels {
-				meta.SupportedReasoningLevels = append(meta.SupportedReasoningLevels, ReasoningLevelPreset{
-					Effort:      strings.TrimSpace(preset.Effort),
-					Description: strings.TrimSpace(preset.Description),
-				})
-			}
-			models[trimmedName] = meta
-		}
-		pd := ProviderDef{
-			BaseURL:          strings.TrimRight(strings.TrimSpace(def.BaseURL), "/"),
-			APIKey:           strings.TrimSpace(def.APIKey),
-			Version:          strings.TrimSpace(def.Version),
-			UserAgent:        strings.TrimSpace(def.UserAgent),
-			Protocol:         strings.TrimSpace(def.Protocol),
-			WebSearchSupport: wsSupport,
-			WebSearchMaxUses: def.WebSearch.MaxUses,
-			TavilyAPIKey:     strings.TrimSpace(def.WebSearch.TavilyAPIKey),
-			FirecrawlAPIKey:  strings.TrimSpace(def.WebSearch.FirecrawlAPIKey),
-			SearchMaxRounds:  def.WebSearch.SearchMaxRounds,
-			Extensions:       providerExtensions,
-			Models:           models,
-		}
-		defs[trimmedKey] = pd
-	}
-	return defs, nil
 }
 
 func fromCacheFileConfig(fileConfig CacheFileConfig) CacheConfig {

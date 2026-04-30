@@ -48,16 +48,19 @@ func TestRunReturnsStartupErrorWithConfigDetails(t *testing.T) {
 	configPath := filepath.Join(t.TempDir(), "config.yml")
 	err := os.WriteFile(configPath, []byte(`
 mode: Transform
-provider:
-  providers:
-    openai:
-      base_url: https://openai.example.test
-      api_key: openai-key
-      protocol: openai
-      models:
-        gpt-image-1.5: {}
-  routes:
-    image: "openai/gpt-image-1.5"
+models:
+  gpt-image-1.5: {}
+providers:
+  openai:
+    base_url: https://openai.example.test
+    api_key: openai-key
+    protocol: openai
+    offers:
+      - model: gpt-image-1.5
+routes:
+  image:
+    model: gpt-image-1.5
+    provider: openai
 `), 0644)
 	if err != nil {
 		t.Fatalf("WriteFile() error = %v", err)
@@ -97,13 +100,11 @@ func TestRunUsesXDGDefaultConfigPath(t *testing.T) {
 	configPath := filepath.Join(configDir, "config.yml")
 	err := os.WriteFile(configPath, []byte(`
 mode: CaptureResponse
-developer:
-  proxy:
-    response:
-      model: gpt-capture
-      provider:
-        base_url: https://api.openai.example.test
-        api_key: upstream-openai-key
+proxy:
+  response:
+    model: gpt-capture
+    base_url: https://api.openai.example.test
+    api_key: upstream-openai-key
 `), 0644)
 	if err != nil {
 		t.Fatalf("WriteFile() error = %v", err)

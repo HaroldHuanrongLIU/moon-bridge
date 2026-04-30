@@ -377,10 +377,8 @@ func (server *Server) handleResponses(writer http.ResponseWriter, request *http.
 	}
 
 	record.Model = responsesRequest.Model
-	// Check if this model routes to an OpenAI Responses provider (skip Anthropic conversion).
-	providerKey := server.bridge.ProviderFor(responsesRequest.Model)
-	// If the model has no route and is not a direct provider/model reference, reject early.
-	if providerKey == "" {
+	resolvedRoute, resolveErr := server.resolveModelOrFallback(responsesRequest.Model)
+	if resolveErr != nil {
 		log.Warn("请求了未知模型", "model", responsesRequest.Model)
 		payload := openai.ErrorResponse{Error: openai.ErrorObject{
 			Message: fmt.Sprintf("unknown model: %q", responsesRequest.Model),
@@ -393,13 +391,50 @@ func (server *Server) handleResponses(writer http.ResponseWriter, request *http.
 		writeOpenAIError(writer, http.StatusNotFound, payload)
 		return
 	}
-	if server.providerMgr != nil && server.providerMgr.ProtocolForModel(responsesRequest.Model) == config.ProtocolOpenAIResponse {
-		server.handleOpenAIResponse(writer, request, responsesRequest, providerKey, record)
+
+	// Filter candidates by request features (e.g., image input).
+	filteredCandidates, filterReason := server.filterCandidatesByInput(resolvedRoute.Candidates, responsesRequest.Input)
+	if len(filteredCandidates) == 0 {
+		log.Warn("过滤后无可用提供商", "model", responsesRequest.Model, "reason", filterReason)
+		payload := openai.ErrorResponse{Error: openai.ErrorObject{
+			Message: fmt.Sprintf("no available provider for model %q with the requested features", responsesRequest.Model),
+			Type:    "invalid_request_error",
+			Code:    "provider_error",
+		}}
+		record.Error = traceError("provider_filtered", fmt.Errorf("candidates filtered: %s", filterReason))
+		record.OpenAIResponse = payload
+		server.writeTrace(record)
+		writeOpenAIError(writer, http.StatusBadGateway, payload)
+		return
+	}
+	resolvedRoute.Candidates = filteredCandidates
+	if filterReason != "" {
+		log.Info("候选过滤", "model", responsesRequest.Model, "reason", filterReason)
+	}
+
+	// Protocol branch: get preferred candidate.
+	preferred, ok := resolvedRoute.Preferred()
+	if !ok {
+		log.Error("模型解析结果无可用提供商", "model", responsesRequest.Model)
+		payload := openai.ErrorResponse{Error: openai.ErrorObject{
+			Message: fmt.Sprintf("no available provider for model %q", responsesRequest.Model),
+			Type:    "server_error",
+			Code:    "provider_error",
+		}}
+		record.Error = traceError("provider_error", fmt.Errorf("no available provider for %q", responsesRequest.Model))
+		record.OpenAIResponse = payload
+		server.writeTrace(record)
+		writeOpenAIError(writer, http.StatusBadGateway, payload)
 		return
 	}
 
-	// Resolve per-provider web search mode.
-	reqOpts := server.resolveRequestOptions(responsesRequest.Model, providerKey)
+	if preferred.Protocol == config.ProtocolOpenAIResponse {
+		server.handleOpenAIResponse(writer, request, responsesRequest, resolvedRoute.Candidates, record)
+		return
+	}
+
+	// Resolve per-provider web search mode from the resolved route.
+	reqOpts := server.resolveRequestOptions(responsesRequest.Model, resolvedRoute)
 
 	anthropicRequest, plan, err := server.bridge.ToAnthropic(responsesRequest, sess.ExtensionData, reqOpts)
 	conversionContext := server.bridge.ConversionContext(responsesRequest)
@@ -418,8 +453,8 @@ func (server *Server) handleResponses(writer http.ResponseWriter, request *http.
 		return
 	}
 
-	// Resolve the provider for this request.
-	effectiveProvider := server.resolveProvider(responsesRequest.Model, server.bridge.ProviderFor(responsesRequest.Model))
+	// Resolve the provider for this request using the ResolvedRoute (supports fallback chain).
+	effectiveProvider := server.resolveProvider(responsesRequest.Model, resolvedRoute)
 	if effectiveProvider == nil {
 		log.Error("模型无可用提供商", "model", responsesRequest.Model)
 		writeOpenAIError(writer, http.StatusBadGateway, openai.ErrorResponse{Error: openai.ErrorObject{
@@ -439,7 +474,6 @@ func (server *Server) handleResponses(writer http.ResponseWriter, request *http.
 		server.handleStream(writer, request, responsesRequest, anthropicRequest, plan, record, conversionContext, sess, effectiveProvider)
 		return
 	}
-
 	log.Debug("发送非流式请求到提供商", "model", anthropicRequest.Model)
 	anthropicResponse, err := effectiveProvider.CreateMessage(request.Context(), anthropicRequest)
 	if err != nil {
@@ -481,7 +515,8 @@ func (server *Server) handleResponses(writer http.ResponseWriter, request *http.
 			if server.stats == nil {
 				return 0
 			}
-			return server.stats.ComputeBillingCost(responsesRequest.Model, billingUsage)
+			preferredCandidate, _ := resolvedRoute.Preferred()
+			return computeCostWithProviderPricing(server.providerMgr, server.stats, responsesRequest.Model, anthropicRequest.Model, preferredCandidate.ProviderKey, billingUsage)
 		}(),
 		"success", "",
 	)
@@ -714,9 +749,15 @@ func (w *anthropicClientWrapper) StreamMessage(ctx context.Context, request anth
 
 // handleOpenAIResponse proxies a request directly to an OpenAI Responses upstream
 // without Anthropic protocol conversion. It handles both streaming and non-streaming.
-func (server *Server) handleOpenAIResponse(writer http.ResponseWriter, request *http.Request, responsesRequest openai.ResponsesRequest, providerKey string, record mbtrace.Record) {
+// handleOpenAIResponse proxies a request directly to an OpenAI Responses upstream
+// without Anthropic protocol conversion. It supports fallback across multiple
+// OpenAI-response protocol candidates. Non-streaming: HTTP failure -> next candidate.
+// Streaming: only fallback before SSE headers are written (during HTTP connect).
+func (server *Server) handleOpenAIResponse(writer http.ResponseWriter, request *http.Request, responsesRequest openai.ResponsesRequest, candidates []provider.ProviderCandidate, record mbtrace.Record) {
 	proxyStart := time.Now()
 	var hookErr string
+	var lastErr error
+	actualModel := "" // updated with the successfully used upstream model
 	defer func() {
 		if hookErr != "" {
 			server.onRequestCompleted(
@@ -741,166 +782,250 @@ func (server *Server) handleOpenAIResponse(writer http.ResponseWriter, request *
 		return
 	}
 
-	// Resolve provider key from model alias when Bridge.ProviderFor returned empty.
-	// providerKey is guaranteed non-empty by the caller (handleResponses).
-
-	baseURL := server.providerMgr.ProviderBaseURL(providerKey)
-	apiKey := server.providerMgr.ProviderAPIKey(providerKey)
-	if baseURL == "" {
-		log.Error("OpenAI 提供商缺少 base_url", "provider", providerKey)
+	// Filter to only OpenAI-response protocol candidates.
+	openaiCandidates := make([]provider.ProviderCandidate, 0, len(candidates))
+	for _, c := range candidates {
+		if c.Protocol == config.ProtocolOpenAIResponse {
+			openaiCandidates = append(openaiCandidates, c)
+		}
+	}
+	if len(openaiCandidates) == 0 {
+		log.Error("没有 OpenAI Responses 协议的提供商候选")
 		payload := openai.ErrorResponse{Error: openai.ErrorObject{
-			Message: "提供商未配置",
-			Type:    "server_error",
-			Code:    "internal_error",
-		}}
-		record.Error = map[string]string{"stage": "openai_provider_config", "message": "missing base_url"}
-		record.OpenAIResponse = payload
-		server.writeTrace(record)
-		hookErr = "missing base_url"
-		writeOpenAIError(writer, http.StatusBadGateway, payload)
-		return
-	}
-
-	// Build upstream URL: baseURL + /v1/responses
-	upstreamURL := strings.TrimRight(baseURL, "/")
-	if !strings.HasSuffix(upstreamURL, "/v1/responses") && !strings.HasSuffix(upstreamURL, "/responses") {
-		upstreamURL += "/v1/responses"
-	}
-
-	upstreamRequest := responsesRequest
-	upstreamRequest.Model = server.providerMgr.UpstreamModelFor(responsesRequest.Model)
-
-	// Inject web_search tool if enabled for this model.
-	if server.providerMgr != nil && server.providerMgr.ResolvedWebSearchForModel(responsesRequest.Model) == "enabled" {
-		upstreamRequest.Tools = InjectWebSearchTool(upstreamRequest.Tools)
-	}
-
-	body, err := json.Marshal(upstreamRequest)
-	if err != nil {
-		log.Error("序列化请求失败", "error", err)
-		payload := openai.ErrorResponse{Error: openai.ErrorObject{
-			Message: "内部错误",
-			Type:    "server_error",
-			Code:    "internal_error",
-		}}
-		record.Error = traceError("encode_openai_upstream_request", err)
-		record.OpenAIResponse = payload
-		hookErr = "encode upstream request"
-		server.writeTrace(record)
-		writeOpenAIError(writer, http.StatusInternalServerError, payload)
-		return
-	}
-
-	// Create upstream request
-	upstreamReq, err := http.NewRequestWithContext(request.Context(), http.MethodPost, upstreamURL, bytes.NewReader(body))
-	if err != nil {
-		log.Error("创建上游请求失败", "error", err)
-		payload := openai.ErrorResponse{Error: openai.ErrorObject{
-			Message: "上游请求失败",
-			Type:    "server_error",
-			Code:    "internal_error",
-		}}
-		record.Error = traceError("create_openai_upstream_request", err)
-		hookErr = "create upstream request"
-		record.OpenAIResponse = payload
-		server.writeTrace(record)
-		writeOpenAIError(writer, http.StatusBadGateway, payload)
-		return
-	}
-	upstreamReq.Header.Set("Content-Type", "application/json")
-	upstreamReq.Header.Set("Authorization", "Bearer "+apiKey)
-
-	client := server.openAIHTTP
-	if client == nil {
-		client = &http.Client{Timeout: 0} // no timeout for streaming
-	}
-	upstreamResp, err := client.Do(upstreamReq)
-	if err != nil {
-		log.Error("OpenAI 上游请求失败",
-			"request_model", responsesRequest.Model,
-			"actual_model", upstreamRequest.Model,
-			"status_code", http.StatusBadGateway,
-			"error", err.Error(),
-			"stage", "openai_upstream",
-		)
-		payload := openai.ErrorResponse{Error: openai.ErrorObject{
-			Message: err.Error(),
+			Message: "没有可用的提供商",
 			Type:    "server_error",
 			Code:    "provider_error",
 		}}
-		hookErr = err.Error()
-		record.Error = traceError("openai_upstream", err)
+		record.Error = map[string]string{"stage": "openai_provider_config", "message": "no openai-response candidates"}
 		record.OpenAIResponse = payload
 		server.writeTrace(record)
 		writeOpenAIError(writer, http.StatusBadGateway, payload)
+		hookErr = "no openai-response candidates"
 		return
 	}
-	defer upstreamResp.Body.Close()
 
-	// Copy response headers and status
-	for key, values := range upstreamResp.Header {
-		for _, v := range values {
-			writer.Header().Add(key, v)
+	for i, candidate := range openaiCandidates {
+		providerKey := candidate.ProviderKey
+		isLast := i == len(openaiCandidates)-1
+		log := logger.L().With("provider", providerKey, "attempt", i+1)
+
+		baseURL := server.providerMgr.ProviderBaseURL(providerKey)
+		apiKey := server.providerMgr.ProviderAPIKey(providerKey)
+		if baseURL == "" {
+			if isLast {
+				log.Error("OpenAI 提供商缺少 base_url")
+				payload := openai.ErrorResponse{Error: openai.ErrorObject{
+					Message: "提供商未配置",
+					Type:    "server_error",
+					Code:    "internal_error",
+				}}
+				record.Error = map[string]string{"stage": "openai_provider_config", "message": "missing base_url"}
+				record.OpenAIResponse = payload
+				server.writeTrace(record)
+				hookErr = "missing base_url"
+				writeOpenAIError(writer, http.StatusBadGateway, payload)
+				return
+			}
+			logger.Warn("OpenAI 提供商缺少 base_url，尝试下一个候选",
+				"provider", providerKey,
+				"request_model", responsesRequest.Model,
+				"attempt", i+1)
+			lastErr = fmt.Errorf("provider %q has empty base_url", providerKey)
+			continue
 		}
-	}
-	writer.WriteHeader(upstreamResp.StatusCode)
 
-	traceEnabled := server.tracer != nil && server.tracer.Enabled()
-	usageEnabled := upstreamResp.StatusCode >= 200 && upstreamResp.StatusCode <= 299 && (server.stats != nil || server.pluginRegistry != nil)
-	shouldCapture := traceEnabled || usageEnabled
+		// Build upstream URL: baseURL + /v1/responses
+		upstreamURL := strings.TrimRight(baseURL, "/")
+		if !strings.HasSuffix(upstreamURL, "/v1/responses") && !strings.HasSuffix(upstreamURL, "/responses") {
+			upstreamURL += "/v1/responses"
+		}
 
-	var captured bytes.Buffer
-	target := io.Writer(writer)
-	if shouldCapture {
-		target = io.MultiWriter(writer, &captured)
-	}
-	if _, err := io.Copy(target, upstreamResp.Body); err != nil {
-		hookErr = "copy upstream response"
-		log.Error("复制上游响应失败", "error", err)
-		return
-	}
+		upstreamRequest := responsesRequest
+		upstreamRequest.Model = candidate.UpstreamModel
+		actualModel = candidate.UpstreamModel
 
-	if traceEnabled {
-		record.OpenAIResponse = mbtrace.RawJSONOrString(captured.Bytes())
-		server.writeTrace(record)
-	}
+		// Inject web_search tool if enabled for this model.
+		if server.providerMgr.ResolvedWebSearchForModel(responsesRequest.Model) == "enabled" {
+			upstreamRequest.Tools = InjectWebSearchTool(upstreamRequest.Tools)
+		}
 
-	// Capture usage for metrics recording, even when stats recording is disabled.
-	var billingUsage stats.BillingUsage
-	var metricTelemetry plugin.RequestUsage
-	if usageEnabled {
-		if u, raw, source, ok := openAIUsageFromResponse(captured.Bytes(), responsesRequest.Stream); ok {
-			billingUsage = u.BillingUsage()
-			metricTelemetry = usageFromStats(config.ProtocolOpenAIResponse, source, u, raw)
-			if server.stats != nil {
-				server.stats.RecordBilling(responsesRequest.Model, upstreamRequest.Model, billingUsage)
-				logBillingUsageLine(responsesRequest.Model, upstreamRequest.Model, billingUsage, server.stats)
+		body, err := json.Marshal(upstreamRequest)
+		if err != nil {
+			if isLast {
+				log.Error("序列化请求失败", "error", err)
+				payload := openai.ErrorResponse{Error: openai.ErrorObject{
+					Message: "内部错误",
+					Type:    "server_error",
+					Code:    "internal_error",
+				}}
+				record.Error = traceError("encode_openai_upstream_request", err)
+				record.OpenAIResponse = payload
+				hookErr = "encode upstream request"
+				server.writeTrace(record)
+				writeOpenAIError(writer, http.StatusInternalServerError, payload)
+				return
+			}
+			logger.Warn("OpenAI 请求序列化失败，尝试下一个候选",
+				"provider", providerKey,
+				"request_model", responsesRequest.Model,
+				"attempt", i+1,
+				"error", err)
+			lastErr = err
+			continue
+		}
+
+		// Create upstream request
+		upstreamReq, err := http.NewRequestWithContext(request.Context(), http.MethodPost, upstreamURL, bytes.NewReader(body))
+		if err != nil {
+			if isLast {
+				log.Error("创建上游请求失败", "error", err)
+				payload := openai.ErrorResponse{Error: openai.ErrorObject{
+					Message: "上游请求失败",
+					Type:    "server_error",
+					Code:    "internal_error",
+				}}
+				record.Error = traceError("create_openai_upstream_request", err)
+				hookErr = "create upstream request"
+				record.OpenAIResponse = payload
+				server.writeTrace(record)
+				writeOpenAIError(writer, http.StatusBadGateway, payload)
+				return
+			}
+			logger.Warn("OpenAI 上游请求创建失败，尝试下一个候选",
+				"provider", providerKey,
+				"request_model", responsesRequest.Model,
+				"attempt", i+1,
+				"error", err)
+			lastErr = err
+			continue
+		}
+		upstreamReq.Header.Set("Content-Type", "application/json")
+		upstreamReq.Header.Set("Authorization", "Bearer "+apiKey)
+
+		client := server.openAIHTTP
+		if client == nil {
+			client = &http.Client{Timeout: 0}
+		}
+		upstreamResp, err := client.Do(upstreamReq)
+		if err != nil {
+			if isLast {
+				log.Error("OpenAI 上游请求失败",
+					"request_model", responsesRequest.Model,
+					"actual_model", upstreamRequest.Model,
+					"error", err.Error(),
+					"stage", "openai_upstream",
+				)
+				payload := openai.ErrorResponse{Error: openai.ErrorObject{
+					Message: err.Error(),
+					Type:    "server_error",
+					Code:    "provider_error",
+				}}
+				hookErr = err.Error()
+				record.Error = traceError("openai_upstream", err)
+				record.OpenAIResponse = payload
+				server.writeTrace(record)
+				writeOpenAIError(writer, http.StatusBadGateway, payload)
+				return
+			}
+			logger.Warn("OpenAI 上游连接失败，回退到下一个候选",
+				"request_model", responsesRequest.Model,
+				"attempt", i+1,
+				"provider", providerKey,
+				"error", err,
+			)
+			lastErr = err
+			continue
+		}
+		defer upstreamResp.Body.Close()
+
+		// Log successful fallback if not on the first candidate
+		if i > 0 {
+			logger.Info("OpenAI 回退成功",
+				"request_model", responsesRequest.Model,
+				"final_provider", providerKey,
+				"final_model", candidate.UpstreamModel,
+				"attempt", i+1,
+			)
+		}
+
+		// Copy response headers and status
+		for key, values := range upstreamResp.Header {
+			for _, v := range values {
+				writer.Header().Add(key, v)
 			}
 		}
-	}
-	if metricTelemetry.Protocol == "" {
-		metricTelemetry = zeroUsage(config.ProtocolOpenAIResponse, "none")
+		writer.WriteHeader(upstreamResp.StatusCode)
+
+		traceEnabled := server.tracer != nil && server.tracer.Enabled()
+		usageEnabled := upstreamResp.StatusCode >= 200 && upstreamResp.StatusCode <= 299 && (server.stats != nil || server.pluginRegistry != nil)
+		shouldCapture := traceEnabled || usageEnabled
+
+		var captured bytes.Buffer
+		target := io.Writer(writer)
+		if shouldCapture {
+			target = io.MultiWriter(writer, &captured)
+		}
+		if _, err := io.Copy(target, upstreamResp.Body); err != nil {
+			hookErr = "copy upstream response"
+			log.Error("复制上游响应失败", "error", err)
+			return
+		}
+
+		if traceEnabled {
+			record.OpenAIResponse = mbtrace.RawJSONOrString(captured.Bytes())
+			server.writeTrace(record)
+		}
+
+		// Capture usage for metrics recording.
+		var billingUsage stats.BillingUsage
+		var metricTelemetry plugin.RequestUsage
+		if usageEnabled {
+			if u, raw, source, ok := openAIUsageFromResponse(captured.Bytes(), responsesRequest.Stream); ok {
+				billingUsage = u.BillingUsage()
+				metricTelemetry = usageFromStats(config.ProtocolOpenAIResponse, source, u, raw)
+				if server.stats != nil {
+					server.stats.RecordBilling(responsesRequest.Model, actualModel, billingUsage)
+					logBillingUsageLine(responsesRequest.Model, actualModel, billingUsage, server.stats)
+				}
+			}
+		}
+		if metricTelemetry.Protocol == "" {
+			metricTelemetry = zeroUsage(config.ProtocolOpenAIResponse, "none")
+		}
+
+		// Record metrics via plugin hooks.
+		status := "success"
+		errMsg := ""
+		if upstreamResp.StatusCode < 200 || upstreamResp.StatusCode >= 300 {
+			status = "error"
+			errMsg = fmt.Sprintf("HTTP %d", upstreamResp.StatusCode)
+		}
+		cost := float64(0)
+		if server.stats != nil {
+			cost = computeCostWithProviderPricing(server.providerMgr, server.stats, responsesRequest.Model, actualModel, providerKey, billingUsage)
+		}
+		server.onRequestCompleted(
+			responsesRequest.Model, actualModel, proxyStart,
+			metricTelemetry,
+			cost, status, errMsg,
+		)
+
+		// Record trace including final provider info
+		record.Model = fmt.Sprintf("%s (%s)", responsesRequest.Model, providerKey)
+
+		return // success
 	}
 
-	// Record metrics via plugin hooks.
-	status := "success"
-	errMsg := ""
-	if upstreamResp.StatusCode < 200 || upstreamResp.StatusCode >= 300 {
-		status = "error"
-		errMsg = fmt.Sprintf("HTTP %d", upstreamResp.StatusCode)
-	}
-	cost := float64(0)
-	if server.stats != nil {
-		cost = server.stats.ComputeBillingCost(responsesRequest.Model, billingUsage)
-	}
-	server.onRequestCompleted(
-		responsesRequest.Model, upstreamRequest.Model, proxyStart,
-		metricTelemetry,
-		cost, status, errMsg,
+	// All candidates failed
+	log.Error("所有 OpenAI Responses 提供商候选均失败",
+		"request_model", responsesRequest.Model,
+		"candidates_count", len(openaiCandidates),
+		"last_error", lastErr,
 	)
-
+	if hookErr == "" {
+		hookErr = fmt.Sprintf("all %d candidates failed: %v", len(openaiCandidates), lastErr)
+	}
 }
-
 func logUsageLine(requestModel, actualModel string, usage stats.Usage, sessionStats *stats.SessionStats) {
 	logBillingUsageLine(requestModel, actualModel, usage.BillingUsage(), sessionStats)
 }
@@ -1006,33 +1131,54 @@ func statsUsageFromOpenAIUsage(usage openai.Usage) (stats.Usage, bool) {
 		CacheReadInputTokens: cacheRead,
 	}, true
 }
-func (server *Server) resolveProvider(modelAlias string, providerKey string) Provider {
-	if server.providerMgr != nil {
-		// First, try routing by model alias.
-		if _, client, err := server.providerMgr.ClientFor(modelAlias); err == nil && client != nil {
-			return server.maybeWrapProvider(client, modelAlias)
+func (server *Server) resolveProvider(modelAlias string, route *provider.ResolvedRoute) Provider {
+	if server.providerMgr == nil {
+		if server.provider != nil {
+			return server.provider
 		}
-		// Fallback: try providerKey directly.
-		if providerKey != "" {
-			if client, err := server.providerMgr.ClientForKey(providerKey); err == nil && client != nil {
-				return server.maybeWrapProvider(client, modelAlias)
-			}
+		return nil
+	}
+
+	if len(route.Candidates) == 0 {
+		return nil
+	}
+
+	// Single candidate: use maybeWrapProvider as before (includes web search + visual wrapping).
+	if len(route.Candidates) == 1 {
+		c := route.Candidates[0]
+		// When client is nil (legacy fallback from resolveModelOrFallback without providerMgr),
+		// use the single fallback Provider.
+		if c.Client == nil {
+			return server.provider
 		}
-		// Last resort: try any available provider.
-		for _, k := range server.providerMgr.ProviderKeys() {
-			if c, err := server.providerMgr.ClientForKey(k); err == nil && c != nil {
-				return server.maybeWrapProvider(c, modelAlias)
-			}
+		return server.maybeWrapProvider(c.Client, modelAlias)
+	}
+
+	// Multi-candidate: filter same-protocol candidates, wrap preferred fully, fallback raw.
+	prot := route.Candidates[0].Protocol
+	sameProtocol := make([]provider.ProviderCandidate, 0, len(route.Candidates))
+	for _, c := range route.Candidates {
+		if c.Protocol == prot {
+			sameProtocol = append(sameProtocol, c)
 		}
 	}
-	if server.provider != nil {
-		return server.provider
+	if len(sameProtocol) == 0 {
+		return server.maybeWrapProvider(route.Candidates[0].Client, modelAlias)
 	}
-	return nil
+
+	// Create fallbackProvider for raw-candidate retry, and fully-wrap the preferred one.
+	fb := newFallbackProvider(&provider.ResolvedRoute{Candidates: sameProtocol}, server, modelAlias)
+	preferredWrapped := server.maybeWrapProvider(sameProtocol[0].Client, modelAlias)
+	if preferredWrapped == nil {
+		return nil
+	}
+	// Composite: try preferred (fully wrapped) first, then fallbackProvider for raw client retry.
+	return &wrappedFallbackProvider{
+		preferred: preferredWrapped,
+		fallback:  fb,
+	}
 }
 
-// maybeWrapProvider wraps a client with enabled server-side extension
-// orchestrators for the requested model.
 func (server *Server) maybeWrapProvider(client *anthropic.Client, modelAlias string) Provider {
 	var wrapped Provider = &anthropicClientWrapper{client: client}
 	if server.providerMgr == nil {
@@ -1072,8 +1218,7 @@ func (server *Server) visualProvider(cfg visual.Config) Provider {
 }
 
 // resolveRequestOptions builds per-request bridge options based on the provider's
-// resolved web search support. Uses model-level resolution.
-func (server *Server) resolveRequestOptions(modelAlias string, providerKey string) bridge.RequestOptions {
+func (server *Server) resolveRequestOptions(modelAlias string, route *provider.ResolvedRoute) bridge.RequestOptions {
 	if server.providerMgr == nil {
 		return bridge.RequestOptions{}
 	}
@@ -1138,6 +1283,30 @@ func (server *Server) Close() error {
 	return nil
 }
 
+func computeCostWithProviderPricing(pm *provider.ProviderManager, stats *stats.SessionStats, requestModel, actualModel, providerKey string, usage stats.BillingUsage) float64 {
+	if stats == nil {
+		return 0
+	}
+	// Try actual provider pricing first.
+	if pm != nil {
+		if meta, ok := pm.ModelMetaFor(actualModel, providerKey); ok {
+			freshInput := float64(usage.FreshInputTokens)
+			cacheWrite := float64(usage.CacheCreationInputTokens)
+			cacheRead := float64(usage.CacheReadInputTokens)
+			output := float64(usage.OutputTokens)
+			cost := freshInput*meta.InputPrice/1000000 +
+				cacheWrite*meta.CacheWritePrice/1000000 +
+				cacheRead*meta.CacheReadPrice/1000000 +
+				output*meta.OutputPrice/1000000
+			if cost > 0 || meta.InputPrice > 0 || meta.OutputPrice > 0 {
+				return cost
+			}
+		}
+	}
+	// Fall back to stats pricing map.
+	return stats.ComputeBillingCost(requestModel, usage)
+}
+
 func checkAuth(r *http.Request, expectedToken string) bool {
 	auth := r.Header.Get("Authorization")
 	if !strings.HasPrefix(auth, "Bearer ") {
@@ -1145,3 +1314,199 @@ func checkAuth(r *http.Request, expectedToken string) bool {
 	}
 	return strings.TrimSpace(auth[7:]) == expectedToken
 }
+
+// resolveModelOrFallback resolves a model name to a ResolvedRoute.
+// Uses ProviderManager.ResolveModel when available; falls back to bridge.ProviderFor
+// for legacy single-provider mode.
+func (server *Server) resolveModelOrFallback(modelName string) (*provider.ResolvedRoute, error) {
+	if server.providerMgr != nil {
+		return server.providerMgr.ResolveModel(modelName)
+	}
+	// Fallback: use bridge for route alias resolution (legacy single-provider mode).
+	// When providerMgr is nil, we rely on the single fallback Provider (server.provider).
+	providerKey := server.bridge.ProviderFor(modelName)
+	if providerKey == "" && server.provider == nil {
+		return nil, fmt.Errorf("no route or provider found for model %q", modelName)
+	}
+	// Return a synthetic ResolvedRoute with no client; resolveProvider will handle it.
+	return &provider.ResolvedRoute{
+		Candidates: []provider.ProviderCandidate{{
+			ProviderKey: providerKey,
+		}},
+	}, nil
+}
+
+// wrappedFallbackProvider tries the preferred (fully-wrapped) provider first,
+// then falls back to the raw-candidate fallback chain on failure.
+type wrappedFallbackProvider struct {
+	preferred Provider
+	fallback  *fallbackProvider
+}
+
+func (w *wrappedFallbackProvider) CreateMessage(ctx context.Context, request anthropic.MessageRequest) (anthropic.MessageResponse, error) {
+	resp, err := w.preferred.CreateMessage(ctx, request)
+	if err == nil {
+		return resp, nil
+	}
+	logger.Warn("首选提供商调用失败，回退到备选链", "error", err)
+	return w.fallback.CreateMessage(ctx, request)
+}
+
+func (w *wrappedFallbackProvider) StreamMessage(ctx context.Context, request anthropic.MessageRequest) (anthropic.Stream, error) {
+	stream, err := w.preferred.StreamMessage(ctx, request)
+	if err == nil {
+		return stream, nil
+	}
+	logger.Warn("首选提供商流式建连失败，回退到备选链", "error", err)
+	return w.fallback.StreamMessage(ctx, request)
+}
+
+// fallbackProvider wraps multiple provider candidates and implements the Provider
+// interface with automatic fallback. When the first candidate fails, it tries the
+// next one (same protocol only) with a warning log. On stream, fallback only
+// occurs before the first SSE header is written (i.e., during StreamMessage).
+type fallbackProvider struct {
+	candidates []provider.ProviderCandidate
+	server     *Server
+	modelAlias string
+}
+
+func newFallbackProvider(route *provider.ResolvedRoute, server *Server, modelAlias string) *fallbackProvider {
+	return &fallbackProvider{
+		candidates: route.Candidates,
+		server:     server,
+		modelAlias: modelAlias,
+	}
+}
+
+func (f *fallbackProvider) CreateMessage(ctx context.Context, request anthropic.MessageRequest) (anthropic.MessageResponse, error) {
+	var lastErr error
+	for i, c := range f.candidates {
+		request.Model = c.UpstreamModel
+		resp, err := c.Client.CreateMessage(ctx, request)
+		if err == nil {
+			// Log successful fallback
+			if i > 0 {
+				logger.Info("回退成功",
+					"request_model", f.modelAlias,
+					"final_provider", c.ProviderKey,
+					"final_model", c.UpstreamModel,
+					"attempt", i+1,
+				)
+			}
+			return resp, nil
+		}
+		lastErr = err
+		if i < len(f.candidates)-1 {
+			logger.Warn("提供商调用失败，切换到备选",
+				"request_model", f.modelAlias,
+				"attempt", i+1,
+				"provider", c.ProviderKey,
+				"error", err,
+			)
+		}
+	}
+	logger.Error("所有提供商候选均失败",
+		"request_model", f.modelAlias,
+		"last_error", lastErr,
+	)
+	return anthropic.MessageResponse{}, lastErr
+}
+
+func (f *fallbackProvider) StreamMessage(ctx context.Context, request anthropic.MessageRequest) (anthropic.Stream, error) {
+	var lastErr error
+	for i, c := range f.candidates {
+		request.Model = c.UpstreamModel
+		stream, err := c.Client.StreamMessage(ctx, request)
+		if err == nil {
+			if i > 0 {
+				logger.Info("流式回退成功",
+					"request_model", f.modelAlias,
+					"final_provider", c.ProviderKey,
+					"attempt", i+1,
+				)
+			}
+			return stream, nil
+		}
+		lastErr = err
+		if i < len(f.candidates)-1 {
+			logger.Warn("提供商流式建连失败，切换到备选",
+				"request_model", f.modelAlias,
+				"attempt", i+1,
+				"provider", c.ProviderKey,
+				"error", err,
+			)
+		}
+	}
+	logger.Error("所有提供商流式候选均失败",
+		"request_model", f.modelAlias,
+		"last_error", lastErr,
+	)
+	return nil, lastErr
+}
+
+// requestHasImage checks whether the OpenAI request input contains image content.
+// It scans the raw JSON for "input_image", "image", or "image_url" type fields.
+func requestHasImage(input json.RawMessage) bool {
+	if len(input) == 0 || string(input) == "null" {
+		return false
+	}
+	var items []struct {
+		Type string `json:"type"`
+	}
+	// Try array of content parts first.
+	if err := json.Unmarshal(input, &items); err == nil {
+		for _, it := range items {
+			switch it.Type {
+			case "input_image", "image", "image_url":
+				return true
+			}
+		}
+		return false
+	}
+	// Single string input has no image.
+	return false
+}
+
+// filterCandidatesByInput filters a candidate list based on the actual request features:
+// - Image input: filters out candidates whose InputModalities don't include "image".
+// Returns the filtered slice and a log-friendly reason if any candidate was removed.
+func (server *Server) filterCandidatesByInput(candidates []provider.ProviderCandidate, input json.RawMessage) ([]provider.ProviderCandidate, string) {
+	if server.providerMgr == nil {
+		return candidates, ""
+	}
+
+	hasImage := requestHasImage(input)
+	if !hasImage {
+		return candidates, "" // no image filtering needed
+	}
+
+	filtered := make([]provider.ProviderCandidate, 0, len(candidates))
+	removedCount := 0
+	for _, c := range candidates {
+		meta, ok := server.providerMgr.ModelMetaFor(c.UpstreamModel, c.ProviderKey)
+		if !ok || !hasModalityImage(meta.InputModalities) {
+			removedCount++
+			logger.L().Debug("过滤掉不支持图片的提供商候选", "provider", c.ProviderKey, "model", c.UpstreamModel)
+			continue
+		}
+		filtered = append(filtered, c)
+	}
+
+	var reason string
+	if removedCount > 0 {
+		reason = fmt.Sprintf("请求包含图片输入，已过滤 %d 个不支持图片的提供商候选", removedCount)
+	}
+	return filtered, reason
+}
+
+// hasModalityImage checks if "image" is in the InputModalities list.
+func hasModalityImage(modalities []string) bool {
+	for _, m := range modalities {
+		if m == "image" {
+			return true
+		}
+	}
+	return false
+}
+

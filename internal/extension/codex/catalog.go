@@ -129,18 +129,13 @@ func BuildModelInfoFromRoute(alias string, ownedBy string, route config.RouteEnt
 }
 
 // BuildModelInfoFromProviderModel creates a Codex-compatible ModelInfo from a
-// provider model catalog entry.
+// provider model catalog entry. The slug is the upstream model name (pure, no
+// provider suffix) and displayName is derived from the meta or auto-generated.
 func BuildModelInfoFromProviderModel(slug string, ownedBy string, meta config.ModelMeta) ModelInfo {
 	displayName := meta.DisplayName
 	if displayName == "" {
-		// Extract model name from "model(provider)" slug format.
-		if idx := strings.Index(slug, "("); idx > 0 {
-			displayName = slug[:idx]
-		} else {
-			displayName = slug
-		}
+		displayName = DisplayNameFromSlug(slug)
 	}
-	displayName = displayName + "(" + ownedBy + ")"
 	return newModelInfo(slug, displayName, meta.Description, meta.ContextWindow,
 		meta.DefaultReasoningLevel, meta.SupportedReasoningLevels,
 		meta.SupportsReasoningSummaries, meta.DefaultReasoningSummary,
@@ -149,39 +144,52 @@ func BuildModelInfoFromProviderModel(slug string, ownedBy string, meta config.Mo
 		meta.SupportsImageDetailOriginal)
 }
 
-// BuildModelInfosFromConfig returns Codex model catalog entries. Provider model
-// catalogs are the primary source; routes are appended as fallback aliases.
+// BuildModelInfosFromConfig returns Codex model catalog entries.
+// Directly iterates cfg.Models (canonical model definitions) and appends route aliases.
 func BuildModelInfosFromConfig(cfg config.Config) []ModelInfo {
-	seen := make(map[string]bool)
+	modelSlugs := make([]string, 0, len(cfg.Models))
+	for slug := range cfg.Models {
+		modelSlugs = append(modelSlugs, slug)
+	}
+	sort.Strings(modelSlugs)
+
 	var models []ModelInfo
-
-	providerKeys := make([]string, 0, len(cfg.ProviderDefs))
-	for key := range cfg.ProviderDefs {
-		providerKeys = append(providerKeys, key)
-	}
-	sort.Strings(providerKeys)
-	for _, providerKey := range providerKeys {
-		def := cfg.ProviderDefs[providerKey]
-		modelNames := make([]string, 0, len(def.Models))
-		for name := range def.Models {
-			modelNames = append(modelNames, name)
+	for _, slug := range modelSlugs {
+		def := cfg.Models[slug]
+		displayName := def.DisplayName
+		if displayName == "" {
+			displayName = DisplayNameFromSlug(slug)
 		}
-		sort.Strings(modelNames)
-		for _, name := range modelNames {
-			slug := name + "(" + providerKey + ")"
-			if seen[slug] {
-				continue
-			}
-			seen[slug] = true
-			models = append(models, BuildModelInfoFromProviderModel(slug, providerKey, def.Models[name]))
-		}
+		models = append(models, newModelInfo(
+			slug,
+			displayName,
+			def.Description,
+			def.ContextWindow,
+			def.DefaultReasoningLevel,
+			def.SupportedReasoningLevels,
+			def.SupportsReasoningSummaries,
+			def.DefaultReasoningSummary,
+			def.BaseInstructions,
+			inputModalitiesOrDefault(def.InputModalities),
+			def.SupportsImageDetailOriginal,
+		))
 	}
 
+	// Fallback: if cfg.Models is empty, build from ProviderDefs Models (Phase 1 compat).
+	if len(cfg.Models) == 0 {
+		models = buildModelInfosFromProviderDefs(cfg)
+	}
+
+	// Route alias append (non-deduplicated model names only).
 	routeAliases := make([]string, 0, len(cfg.Routes))
 	for alias := range cfg.Routes {
 		routeAliases = append(routeAliases, alias)
 	}
 	sort.Strings(routeAliases)
+	seen := make(map[string]bool)
+	for _, m := range models {
+		seen[m.Slug] = true
+	}
 	for _, alias := range routeAliases {
 		if seen[alias] {
 			continue
@@ -198,10 +206,123 @@ func BuildModelInfosFromConfig(cfg config.Config) []ModelInfo {
 	models = injectVisualModalities(models, cfg)
 	return models
 }
+// buildModelInfosFromProviderDefs builds catalog entries from ProviderDef models.
+// This is a fallback for Phase 1 when cfg.Models is not yet populated.
+func buildModelInfosFromProviderDefs(cfg config.Config) []ModelInfo {
+	// First pass: group by upstream model name across providers.
+	type providerEntry struct {
+		key  string
+		meta config.ModelMeta
+	}
+	grouped := make(map[string][]providerEntry)
 
-// injectVisualModalities ensures models with the visual extension enabled
-// include "image" in their input_modalities, so Codex knows to send image
-// content blocks — the visual orchestrator needs them to function.
+	providerKeys := make([]string, 0, len(cfg.ProviderDefs))
+	for key := range cfg.ProviderDefs {
+		providerKeys = append(providerKeys, key)
+	}
+	sort.Strings(providerKeys)
+	for _, providerKey := range providerKeys {
+		def := cfg.ProviderDefs[providerKey]
+		modelNames := make([]string, 0, len(def.Models))
+		for name := range def.Models {
+			modelNames = append(modelNames, name)
+		}
+		sort.Strings(modelNames)
+		for _, name := range modelNames {
+			grouped[name] = append(grouped[name], providerEntry{key: providerKey, meta: def.Models[name]})
+		}
+	}
+
+	// Second pass: merge metadata for each model name deterministically.
+	modelNames := make([]string, 0, len(grouped))
+	for name := range grouped {
+		modelNames = append(modelNames, name)
+	}
+	sort.Strings(modelNames)
+
+	var models []ModelInfo
+	for _, name := range modelNames {
+		entries := grouped[name]
+		sort.Slice(entries, func(i, j int) bool { return entries[i].key < entries[j].key })
+		preferred := entries[0]
+
+		slug := name
+		displayName := preferred.meta.DisplayName
+		if displayName == "" {
+			displayName = DisplayNameFromSlug(name)
+		}
+
+		description := preferred.meta.Description
+
+		contextWindow := preferred.meta.ContextWindow
+		for _, e := range entries[1:] {
+			if e.meta.ContextWindow > contextWindow {
+				contextWindow = e.meta.ContextWindow
+			}
+		}
+
+		modalitySet := make(map[string]struct{})
+		for _, e := range entries {
+			for _, m := range e.meta.InputModalities {
+				modalitySet[m] = struct{}{}
+			}
+		}
+		mergedModalities := make([]string, 0, len(modalitySet))
+		for m := range modalitySet {
+			mergedModalities = append(mergedModalities, m)
+		}
+		sort.Strings(mergedModalities)
+
+		seenEffort := make(map[string]bool)
+		var mergedLevels []config.ReasoningLevelPreset
+		for _, l := range preferred.meta.SupportedReasoningLevels {
+			if !seenEffort[l.Effort] {
+				seenEffort[l.Effort] = true
+				mergedLevels = append(mergedLevels, l)
+			}
+		}
+		for _, e := range entries[1:] {
+			for _, l := range e.meta.SupportedReasoningLevels {
+				if !seenEffort[l.Effort] {
+					seenEffort[l.Effort] = true
+					mergedLevels = append(mergedLevels, l)
+				}
+			}
+		}
+		if mergedLevels == nil {
+			mergedLevels = []config.ReasoningLevelPreset{}
+		}
+
+		supportsReasoningSummaries := preferred.meta.SupportsReasoningSummaries
+		for _, e := range entries[1:] {
+			if e.meta.SupportsReasoningSummaries {
+				supportsReasoningSummaries = true
+			}
+		}
+
+		supportsImageDetailOriginal := preferred.meta.SupportsImageDetailOriginal
+		for _, e := range entries[1:] {
+			if e.meta.SupportsImageDetailOriginal {
+				supportsImageDetailOriginal = true
+			}
+		}
+
+		models = append(models, newModelInfo(
+			slug,
+			displayName,
+			description,
+			contextWindow,
+			preferred.meta.DefaultReasoningLevel,
+			mergedLevels,
+			supportsReasoningSummaries,
+			preferred.meta.DefaultReasoningSummary,
+			preferred.meta.BaseInstructions,
+			inputModalitiesOrDefault(mergedModalities),
+			supportsImageDetailOriginal,
+		))
+	}
+	return models
+}
 func injectVisualModalities(models []ModelInfo, cfg config.Config) []ModelInfo {
 	result := make([]ModelInfo, len(models))
 	copy(result, models)

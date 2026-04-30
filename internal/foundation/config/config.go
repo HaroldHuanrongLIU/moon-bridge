@@ -56,17 +56,16 @@ type Config struct {
 	LogFormat         string
 	SystemPrompt      string
 	DefaultModel      string
-	ProviderBaseURL   string
-	ProviderAPIKey    string
-	ProviderVersion   string
-	ProviderUserAgent string
-	Protocol          string // "anthropic" (default) or "openai-response"
 	WebSearchSupport  WebSearchSupport
 	WebSearchMaxUses  int
 	TavilyAPIKey      string
 	FirecrawlAPIKey   string
 	SearchMaxRounds   int
 	DefaultMaxTokens  int
+	// Defaults holds the default configuration values.
+	Defaults Defaults
+	// Models is the canonical model definition map (shared across providers).
+	Models map[string]ModelDef
 	// Routes maps a model alias to "provider/upstream_model".
 	Routes         map[string]RouteEntry
 	ProviderDefs   map[string]ProviderDef
@@ -116,6 +115,7 @@ type ProviderDef struct {
 	Version          string
 	UserAgent        string
 	Protocol         string // "anthropic" (default) or "openai-response"
+	Priority         int
 	WebSearchSupport WebSearchSupport
 	WebSearchMaxUses int
 	TavilyAPIKey     string
@@ -124,6 +124,8 @@ type ProviderDef struct {
 	Extensions       map[string]ExtensionSettings
 	// Models is the provider's model catalog: upstream model name -> metadata.
 	Models map[string]ModelMeta
+	// Offers is the list of model offerings for this provider.
+	Offers []OfferEntry
 }
 
 // ModelMeta holds metadata for a model offered by a provider.
@@ -152,6 +154,46 @@ type ModelMeta struct {
 	// WebSearch holds model-level web search config (overrides provider-level).
 	WebSearch  WebSearchConfig
 	Extensions map[string]ExtensionSettings
+}
+
+// ModelPricing holds per-provider model pricing.
+type ModelPricing struct {
+	InputPrice      float64
+	OutputPrice     float64
+	CacheWritePrice float64
+	CacheReadPrice  float64
+}
+
+// Defaults holds the default configuration values.
+type Defaults struct {
+	Model        string
+	MaxTokens    int
+	SystemPrompt string
+}
+
+// ModelDef holds model metadata (without per-provider pricing).
+type ModelDef struct {
+	ContextWindow               int
+	MaxOutputTokens             int
+	DisplayName                 string
+	Description                 string
+	BaseInstructions            string
+	DefaultReasoningLevel       string
+	SupportedReasoningLevels    []ReasoningLevelPreset
+	SupportsReasoningSummaries  bool
+	DefaultReasoningSummary     string
+	InputModalities             []string
+	SupportsImageDetailOriginal bool
+	WebSearch                   WebSearchConfig
+	Extensions                  map[string]ExtensionSettings
+}
+
+// OfferEntry declares that a provider offers a model defined in Models.
+type OfferEntry struct {
+	Model        string      // references models.<slug>
+	UpstreamName string      // optional, upstream model name (empty = same as slug)
+	Pricing      ModelPricing
+	Overrides    *ModelDef   // optional provider-specific overrides
 }
 
 type ResponseProxyConfig struct {
@@ -217,56 +259,50 @@ func (cfg Config) validateTransform() error {
 	if err := cfg.validateSearchConfig(); err != nil {
 		return err
 	}
-	if len(cfg.ProviderDefs) > 0 {
-		hasProviderModel := false
-		for key, def := range cfg.ProviderDefs {
-			if key == "" {
-				return errors.New("providers cannot contain empty provider keys")
+	if len(cfg.ProviderDefs) == 0 {
+		return errors.New("providers are required in transform mode")
+	}
+	hasProviderModel := false
+	for key, def := range cfg.ProviderDefs {
+		if key == "" {
+			return errors.New("providers cannot contain empty provider keys")
+		}
+		if def.BaseURL == "" {
+			return fmt.Errorf("providers.%s.base_url is required", key)
+		}
+		if def.APIKey == "" {
+			return fmt.Errorf("providers.%s.api_key is required", key)
+		}
+		switch def.Protocol {
+		case "", ProtocolAnthropic, ProtocolOpenAIResponse:
+		default:
+			return fmt.Errorf("providers.%s.protocol must be \"anthropic\" or \"openai-response\"", key)
+		}
+		for modelName := range def.Models {
+			if modelName == "" {
+				return fmt.Errorf("providers.%s.models cannot contain empty model names", key)
 			}
-			if def.BaseURL == "" {
-				return fmt.Errorf("providers.%s.base_url is required", key)
+			hasProviderModel = true
+		}
+		// Validate Offers reference existing models.
+		for i, offer := range def.Offers {
+			if offer.Model == "" {
+				return fmt.Errorf("providers.%s.offers[%d].model is required", key, i)
 			}
-			if def.APIKey == "" {
-				return fmt.Errorf("providers.%s.api_key is required", key)
-			}
-			switch def.Protocol {
-			case "", ProtocolAnthropic, ProtocolOpenAIResponse:
-			default:
-				return fmt.Errorf("providers.%s.protocol must be \"anthropic\" or \"openai-response\"", key)
-			}
-			for modelName := range def.Models {
-				if modelName == "" {
-					return fmt.Errorf("providers.%s.models cannot contain empty model names", key)
-				}
-				hasProviderModel = true
+			if _, ok := cfg.Models[offer.Model]; !ok {
+				return fmt.Errorf("providers.%s.offers[%d].model %q not found in models", key, i, offer.Model)
 			}
 		}
-		if !hasProviderModel && len(cfg.Routes) == 0 {
-			return errors.New("provider model catalog or routes must contain at least one model")
-		}
-		for alias, route := range cfg.Routes {
-			if alias == "" || route.Model == "" {
-				return errors.New("routes cannot contain empty aliases or models")
-			}
-			if _, ok := cfg.ProviderDefs[route.Provider]; !ok {
-				return fmt.Errorf("routes.%s references unknown provider %q", alias, route.Provider)
-			}
-		}
-		return nil
 	}
-	// Legacy single-provider mode.
-	if cfg.ProviderBaseURL == "" {
-		return errors.New("provider.base_url is required")
-	}
-	if cfg.ProviderAPIKey == "" {
-		return errors.New("provider.api_key is required")
-	}
-	if len(cfg.Routes) == 0 {
-		return errors.New("routes must contain at least one model mapping")
+	if !hasProviderModel && len(cfg.Routes) == 0 {
+		return errors.New("provider model catalog or routes must contain at least one model")
 	}
 	for alias, route := range cfg.Routes {
 		if alias == "" || route.Model == "" {
 			return errors.New("routes cannot contain empty aliases or models")
+		}
+		if _, ok := cfg.ProviderDefs[route.Provider]; !ok {
+			return fmt.Errorf("routes.%s references unknown provider %q", alias, route.Provider)
 		}
 	}
 	return nil
@@ -376,6 +412,9 @@ func (cfg Config) RouteFor(model string) RouteEntry {
 }
 
 func (cfg Config) DefaultModelAlias() string {
+	if cfg.Defaults.Model != "" {
+		return cfg.Defaults.Model
+	}
 	if cfg.DefaultModel != "" {
 		return cfg.DefaultModel
 	}
@@ -433,7 +472,8 @@ func (cfg Config) WebSearchForProvider(providerKey string) WebSearchSupport {
 }
 
 // WebSearchForModel returns the resolved web search support for a given model alias.
-// Resolution order: route -> model (in provider catalog) -> provider -> global.
+// Resolution order: route -> model (in provider catalog) -> provider -> global ->
+// provider catalog fallback for pure model names.
 func (cfg Config) WebSearchForModel(modelAlias string) WebSearchSupport {
 	// 1. Route-level override.
 	if route, ok := cfg.Routes[modelAlias]; ok {
@@ -459,6 +499,17 @@ func (cfg Config) WebSearchForModel(modelAlias string) WebSearchSupport {
 			}
 		}
 		return cfg.WebSearchForProvider(provider)
+	}
+	// Pure model name: check provider catalog for model-level and provider-level fallback.
+	for _, def := range cfg.ProviderDefs {
+		if meta, ok := def.Models[modelAlias]; ok {
+			if meta.WebSearch.Support != "" {
+				return meta.WebSearch.Support
+			}
+			if def.WebSearchSupport != "" {
+				return def.WebSearchSupport
+			}
+		}
 	}
 	return cfg.WebSearchSupport
 }
@@ -523,6 +574,14 @@ func (cfg Config) webSearchConfigForModel(modelAlias string) WebSearchConfig {
 			}
 		}
 	}
+	// Pure model name: check provider catalog.
+	for _, def := range cfg.ProviderDefs {
+		if meta, ok := def.Models[modelAlias]; ok {
+			if meta.WebSearch.Support != "" {
+				return meta.WebSearch
+			}
+		}
+	}
 	return WebSearchConfig{}
 }
 
@@ -563,12 +622,19 @@ func (cfg Config) WebSearchMaxRoundsForModel(modelAlias string) int {
 }
 
 // providerKeyForModel returns the provider key for a model alias.
+// Falls back to the first provider that has the model in its catalog for pure model names.
 func (cfg Config) providerKeyForModel(modelAlias string) string {
 	if route, ok := cfg.Routes[modelAlias]; ok {
 		return route.Provider
 	}
 	if p, _ := ParseModelRef(modelAlias); p != "" {
 		return p
+	}
+	// Pure model name: find the first provider that offers this model.
+	for key, def := range cfg.ProviderDefs {
+		if _, ok := def.Models[modelAlias]; ok {
+			return key
+		}
 	}
 	return ""
 }
@@ -621,7 +687,8 @@ func (cfg Config) validateExtensions() error {
 }
 
 // ExtensionEnabled returns whether an extension is enabled for a model alias.
-// Resolution order is route -> provider model -> provider -> global -> spec default.
+// Resolution order is route -> provider model -> provider -> global -> spec default,
+// with pure model name fallback to provider catalog.
 func (cfg Config) ExtensionEnabled(name string, modelAlias string) bool {
 	if modelAlias != "" {
 		if route, ok := cfg.Routes[modelAlias]; ok {
@@ -649,6 +716,18 @@ func (cfg Config) ExtensionEnabled(name string, modelAlias string) bool {
 					return *setting.Enabled
 				}
 			}
+		} else {
+			// Pure model name: check provider catalog.
+			for _, def := range cfg.ProviderDefs {
+				if meta, ok := def.Models[modelAlias]; ok {
+					if setting, ok := meta.Extensions[name]; ok && setting.Enabled != nil {
+						return *setting.Enabled
+					}
+					if setting, ok := def.Extensions[name]; ok && setting.Enabled != nil {
+						return *setting.Enabled
+					}
+				}
+			}
 		}
 	}
 	if setting, ok := cfg.Extensions[name]; ok && setting.Enabled != nil {
@@ -661,7 +740,8 @@ func (cfg Config) ExtensionEnabled(name string, modelAlias string) bool {
 }
 
 // ExtensionRawConfig returns the shallow-merged extension config for a model
-// alias. Merge order is global -> provider -> provider model -> route.
+// alias. Merge order is global -> provider -> provider model -> route,
+// with pure model name fallback to provider catalog.
 func (cfg Config) ExtensionRawConfig(name string, modelAlias string) map[string]any {
 	var parts []map[string]any
 	if setting, ok := cfg.Extensions[name]; ok {
@@ -688,6 +768,18 @@ func (cfg Config) ExtensionRawConfig(name string, modelAlias string) map[string]
 					parts = append(parts, setting.RawConfig)
 				}
 				if meta, ok := def.Models[upstream]; ok {
+					if setting, ok := meta.Extensions[name]; ok {
+						parts = append(parts, setting.RawConfig)
+					}
+				}
+			}
+		} else {
+			// Pure model name: check provider catalog.
+			for _, def := range cfg.ProviderDefs {
+				if meta, ok := def.Models[modelAlias]; ok {
+					if setting, ok := def.Extensions[name]; ok {
+						parts = append(parts, setting.RawConfig)
+					}
 					if setting, ok := meta.Extensions[name]; ok {
 						parts = append(parts, setting.RawConfig)
 					}
@@ -722,6 +814,29 @@ func (cfg Config) ProviderFor(modelAlias string) string {
 		return route.Provider
 	}
 	return ""
+}
+
+// ProvidersForModel returns all provider keys that offer the given model name
+// in their model catalog. Pure model name lookup (not route alias or direct ref).
+func (cfg Config) ProvidersForModel(modelName string) []string {
+	var keys []string
+	for key, def := range cfg.ProviderDefs {
+		if _, ok := def.Models[modelName]; ok {
+			keys = append(keys, key)
+		}
+	}
+	return keys
+}
+
+// ModelMetaFor returns the ModelMeta for a model name within a specific provider.
+// Returns (meta, true) if found, (ModelMeta{}, false) otherwise.
+func (cfg Config) ModelMetaFor(modelName string, providerKey string) (ModelMeta, bool) {
+	def, ok := cfg.ProviderDefs[providerKey]
+	if !ok {
+		return ModelMeta{}, false
+	}
+	meta, ok := def.Models[modelName]
+	return meta, ok
 }
 
 // ParseModelRef parses a model reference that may be in "provider/model" or "model(provider)" format.

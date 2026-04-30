@@ -98,6 +98,9 @@ func runTransform(ctx context.Context, cfg config.Config, errors io.Writer) erro
 				}
 				pricing[slug] = p
 				pricing[newSlug] = p
+        if _, exists := pricing[modelName]; !exists {
+        	pricing[modelName] = p
+        }
 			}
 		}
 	}
@@ -176,33 +179,30 @@ func resolveDefaultClient(pm *provider.ProviderManager, errors io.Writer) *anthr
 
 // buildProviderDefsFromConfig converts config into provider definition map.
 func buildProviderDefsFromConfig(cfg config.Config) map[string]provider.ProviderConfig {
-	if len(cfg.ProviderDefs) > 0 {
-		defs := make(map[string]provider.ProviderConfig, len(cfg.ProviderDefs))
-		for key, def := range cfg.ProviderDefs {
-			modelNames := make([]string, 0, len(def.Models))
-			for name := range def.Models {
-				modelNames = append(modelNames, name)
-			}
-			defs[key] = provider.ProviderConfig{
-				BaseURL:          def.BaseURL,
-				APIKey:           def.APIKey,
-				Version:          def.Version,
-				UserAgent:        def.UserAgent,
-				Protocol:         def.Protocol,
-				WebSearchSupport: string(def.WebSearchSupport),
-				ModelNames:       modelNames,
-			}
+	defs := make(map[string]provider.ProviderConfig, len(cfg.ProviderDefs))
+	for key, def := range cfg.ProviderDefs {
+		modelNames := make([]string, 0, len(def.Models))
+		for name := range def.Models {
+			modelNames = append(modelNames, name)
 		}
-		return defs
+		models := make(map[string]provider.ModelMeta, len(def.Models))
+		for name, meta := range def.Models {
+			models[name] = provider.ModelMeta(meta)
+		}
+		defs[key] = provider.ProviderConfig{
+			BaseURL:          def.BaseURL,
+			APIKey:           def.APIKey,
+			Version:          def.Version,
+			UserAgent:        def.UserAgent,
+			Protocol:         def.Protocol,
+			Priority:         def.Priority,
+			WebSearchSupport: string(def.WebSearchSupport),
+			ModelNames:       modelNames,
+			Models:           models,
+			Offers:           def.Offers,
+		}
 	}
-	// Legacy single-provider mode.
-	return provider.BuildProviderConfigs(
-		cfg.ProviderBaseURL,
-		cfg.ProviderAPIKey,
-		cfg.ProviderVersion,
-		cfg.ProviderUserAgent,
-		nil,
-	)
+	return defs
 }
 
 // buildModelRoutesFromConfig converts config model entries into route definitions.
@@ -275,6 +275,9 @@ func resolvePerProviderWebSearch(ctx context.Context, cfg config.Config, pm *pro
 			modelWS := cfg.WebSearchForModel(alias)
 			resolveModelWebSearch(ctx, alias, modelWS, providerWS, pm, errors)
 			resolveModelWebSearch(ctx, newAlias, modelWS, providerWS, pm, errors)
+			// Resolve pure model name for this provider's catalog.
+			pureWS := cfg.WebSearchForModel(modelName)
+			resolveModelWebSearch(ctx, modelName, pureWS, providerWS, pm, errors)
 		}
 	}
 	for alias, route := range cfg.Routes {

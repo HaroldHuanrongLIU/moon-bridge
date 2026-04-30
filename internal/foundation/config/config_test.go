@@ -20,31 +20,39 @@ func builtinExtensionSpecsForTest() []config.ExtensionConfigSpec {
 func TestLoadFromYAMLParsesTransformConfig(t *testing.T) {
 	cfg, err := config.LoadFromYAML([]byte(`
 mode: Transform
-provider:
-  providers:
-    main:
-      base_url: https://provider.example.test
-      api_key: upstream-key
-      user_agent: Bun/1.3.13
-      web_search:
-        support: auto
-      models:
-        claude-test:
-          context_window: 200000
-          max_output_tokens: 100000
-        claude-fast: {}
-  routes:
-    gpt-test: "main/claude-test"
-    gpt-fast: "main/claude-fast"
-  web_search:
-    support: auto
-    max_uses: 12
-  default_model: gpt-test
+models:
+  claude-test:
+    context_window: 200000
+    max_output_tokens: 100000
+  claude-fast: {}
+providers:
+  main:
+    base_url: https://provider.example.test
+    api_key: upstream-key
+    user_agent: Bun/1.3.13
+    web_search:
+      support: auto
+    offers:
+      - model: claude-test
+      - model: claude-fast
+routes:
+  gpt-test:
+    model: claude-test
+    provider: main
+  gpt-fast:
+    model: claude-fast
+    provider: main
+web_search:
+  support: auto
+  max_uses: 12
+defaults:
+  model: gpt-test
 cache:
   mode: explicit
   ttl: 1h
   min_breakpoint_tokens: 4096
-trace_requests: true
+trace:
+  enabled: true
 `))
 	if err != nil {
 		t.Fatalf("LoadFromYAML() error = %v", err)
@@ -121,20 +129,24 @@ func TestXDGDefaultConfigPathFallsBackToHome(t *testing.T) {
 		t.Fatalf("XDGDefaultConfigPath() = %q, want %q", got, want)
 	}
 }
+
 func TestLoadFromYAMLCanDisableWebSearch(t *testing.T) {
 	cfg, err := config.LoadFromYAML([]byte(`
 mode: Transform
-provider:
-  providers:
-    main:
-      base_url: https://provider.example.test
-      api_key: upstream-key
-      models:
-        claude-test: {}
-  routes:
-    moonbridge: "main/claude-test"
-  web_search:
-    support: disabled
+models:
+  claude-test: {}
+providers:
+  main:
+    base_url: https://provider.example.test
+    api_key: upstream-key
+    offers:
+      - model: claude-test
+routes:
+  moonbridge:
+    model: claude-test
+    provider: main
+web_search:
+  support: disabled
 `))
 	if err != nil {
 		t.Fatalf("LoadFromYAML() error = %v", err)
@@ -150,31 +162,37 @@ provider:
 func TestLoadFromYAMLParsesMultiProviderProtocol(t *testing.T) {
 	cfg, err := config.LoadFromYAMLWithOptions([]byte(`
 mode: Transform
-provider:
-  providers:
-    deepseek:
-      base_url: https://deepseek.example.test
-      api_key: deepseek-key
-      models:
-        deepseek-v4-pro:
-          extensions:
-            deepseek_v4:
-              enabled: true
-          default_reasoning_level: high
-          supported_reasoning_levels:
-            - effort: high
-              description: High reasoning effort
-            - effort: xhigh
-              description: Extra high reasoning effort
-    openai:
-      base_url: https://openai.example.test
-      api_key: openai-key
-      protocol: openai-response
-      models:
-        gpt-image-1.5: {}
-  routes:
-    moonbridge: "deepseek/deepseek-v4-pro"
-    image: "openai/gpt-image-1.5"
+models:
+  deepseek-v4-pro:
+    default_reasoning_level: high
+    supported_reasoning_levels:
+      - effort: high
+        description: High reasoning effort
+      - effort: xhigh
+        description: Extra high reasoning effort
+    extensions:
+      deepseek_v4:
+        enabled: true
+  gpt-image-1.5: {}
+providers:
+  deepseek:
+    base_url: https://deepseek.example.test
+    api_key: deepseek-key
+    offers:
+      - model: deepseek-v4-pro
+  openai:
+    base_url: https://openai.example.test
+    api_key: openai-key
+    protocol: openai-response
+    offers:
+      - model: gpt-image-1.5
+routes:
+  moonbridge:
+    model: deepseek-v4-pro
+    provider: deepseek
+  image:
+    model: gpt-image-1.5
+    provider: openai
 `), config.LoadOptions{ExtensionSpecs: builtinExtensionSpecsForTest()})
 	if err != nil {
 		t.Fatalf("LoadFromYAML() error = %v", err)
@@ -202,28 +220,36 @@ provider:
 func TestLoadFromYAMLParsesVisualConfig(t *testing.T) {
 	cfg, err := config.LoadFromYAMLWithOptions([]byte(`
 mode: Transform
+models:
+  deepseek-v4-pro:
+    extensions:
+      visual:
+        enabled: true
+  kimi-vision:
+    context_window: 128000
+providers:
+  deepseek:
+    base_url: https://deepseek.example.test
+    api_key: deepseek-key
+    offers:
+      - model: deepseek-v4-pro
+  kimi:
+    base_url: https://kimi.example.test/v1
+    api_key: kimi-key
+    offers:
+      - model: kimi-vision
+routes:
+  moonbridge:
+    model: deepseek-v4-pro
+    provider: deepseek
 extensions:
   visual:
+    enabled: true
     config:
       provider: kimi
       model: kimi-vision
       max_rounds: 3
       max_tokens: 1024
-provider:
-  providers:
-    deepseek:
-      base_url: https://deepseek.example.test
-      api_key: deepseek-key
-      models:
-        deepseek-v4-pro:
-          extensions:
-            visual:
-              enabled: true
-    kimi:
-      base_url: https://kimi.example.test/v1
-      api_key: kimi-key
-  routes:
-    moonbridge: "deepseek/deepseek-v4-pro"
 `), config.LoadOptions{ExtensionSpecs: builtinExtensionSpecsForTest()})
 	if err != nil {
 		t.Fatalf("LoadFromYAML() error = %v", err)
@@ -249,25 +275,24 @@ provider:
 func TestLoadFromYAMLRejectsLegacyModelVisualFlag(t *testing.T) {
 	_, err := config.LoadFromYAML([]byte(`
 mode: Transform
-provider:
-  providers:
-    deepseek:
-      base_url: https://deepseek.example.test
-      api_key: deepseek-key
-      models:
-        deepseek-v4-pro:
-          visual: true
-    kimi:
-      base_url: https://kimi.example.test/v1
-      api_key: kimi-key
-      models:
-        kimi-vision: {}
-  routes:
-    moonbridge: "deepseek/deepseek-v4-pro"
-  visual:
-    enabled: true
-    provider: kimi
-    model: kimi-vision
+models:
+  deepseek-v4-pro:
+    visual: true
+providers:
+  deepseek:
+    base_url: https://deepseek.example.test
+    api_key: deepseek-key
+    offers:
+      - model: deepseek-v4-pro
+  kimi:
+    base_url: https://kimi.example.test/v1
+    api_key: kimi-key
+    offers:
+      - model: kimi-vision
+routes:
+  moonbridge:
+    model: deepseek-v4-pro
+    provider: deepseek
 `))
 	if err == nil {
 		t.Fatal("LoadFromYAML() error = nil, want unknown field error for legacy visual flag")
@@ -280,15 +305,17 @@ provider:
 func TestLoadFromYAMLAllowsProviderModelCatalogWithoutRoutes(t *testing.T) {
 	cfg, err := config.LoadFromYAML([]byte(`
 mode: Transform
-provider:
-  providers:
-    main:
-      base_url: https://provider.example.test
-      api_key: upstream-key
-      models:
-        claude-test:
-          context_window: 200000
-  default_model: main/claude-test
+models:
+  claude-test:
+    context_window: 200000
+providers:
+  main:
+    base_url: https://provider.example.test
+    api_key: upstream-key
+    offers:
+      - model: claude-test
+defaults:
+  model: main/claude-test
 `))
 	if err != nil {
 		t.Fatalf("LoadFromYAML() error = %v", err)
@@ -309,147 +336,164 @@ func TestLoadFromYAMLRejectsInvalidMultiProviderConfig(t *testing.T) {
 	for name, input := range map[string]string{
 		"missing provider base URL": `
 mode: Transform
-provider:
-  providers:
-    openai:
-      api_key: openai-key
-      protocol: openai-response
-      models:
-        gpt-image-1.5: {}
-  routes:
-    image: "openai/gpt-image-1.5"
+models:
+  gpt-image-1.5: {}
+providers:
+  openai:
+    api_key: openai-key
+    protocol: openai-response
+    offers:
+      - model: gpt-image-1.5
+routes:
+  image:
+    model: gpt-image-1.5
+    provider: openai
 `,
 		"invalid protocol": `
 mode: Transform
-provider:
-  providers:
-    openai:
-      base_url: https://openai.example.test
-      api_key: openai-key
-      protocol: responses
-      models:
-        gpt-image-1.5: {}
-  routes:
-    image: "openai/gpt-image-1.5"
+models:
+  gpt-image-1.5: {}
+providers:
+  openai:
+    base_url: https://openai.example.test
+    api_key: openai-key
+    protocol: responses
+    offers:
+      - model: gpt-image-1.5
+routes:
+  image:
+    model: gpt-image-1.5
+    provider: openai
 `,
 		"old openai protocol name removed": `
 mode: Transform
-provider:
-  providers:
-    openai:
-      base_url: https://openai.example.test
-      api_key: openai-key
-      protocol: openai
-      models:
-        gpt-image-1.5: {}
-  routes:
-    image: "openai/gpt-image-1.5"
+models:
+  gpt-image-1.5: {}
+providers:
+  openai:
+    base_url: https://openai.example.test
+    api_key: openai-key
+    protocol: openai
+    offers:
+      - model: gpt-image-1.5
+routes:
+  image:
+    model: gpt-image-1.5
+    provider: openai
 `,
 		"missing provider model catalog and routes": `
 mode: Transform
-provider:
-  providers:
-    openai:
-      base_url: https://openai.example.test
-      api_key: openai-key
-      protocol: openai-response
-`,
-		"empty provider model name": `
-mode: Transform
-provider:
-  providers:
-    openai:
-      base_url: https://openai.example.test
-      api_key: openai-key
-      protocol: openai-response
-      models:
-        "": {}
+providers:
+  openai:
+    base_url: https://openai.example.test
+    api_key: openai-key
+    protocol: openai-response
 `,
 		"empty route model": `
 mode: Transform
-provider:
-  providers:
-    openai:
-      base_url: https://openai.example.test
-      api_key: openai-key
-      protocol: openai-response
-  routes:
-    image: "openai/"
+models:
+  gpt-image-1.5: {}
+providers:
+  openai:
+    base_url: https://openai.example.test
+    api_key: openai-key
+    protocol: openai-response
+    offers:
+      - model: gpt-image-1.5
+routes:
+  image:
+    model: ""
+    provider: openai
 `,
 		"deepseek extension on openai-response protocol": `
 mode: Transform
-provider:
-  providers:
-    openai:
-      base_url: https://openai.example.test
-      api_key: openai-key
-      protocol: openai-response
-      models:
-        gpt-image-1.5:
-          extensions:
-            deepseek_v4:
-              enabled: true
-  routes:
-    image: "openai/gpt-image-1.5"
-`,
-		"global deepseek extension on openai-response protocol": `
-mode: Transform
+models:
+  gpt-image-1.5: {}
+providers:
+  openai:
+    base_url: https://openai.example.test
+    api_key: openai-key
+    protocol: openai-response
+    offers:
+      - model: gpt-image-1.5
+routes:
+  image:
+    model: gpt-image-1.5
+    provider: openai
 extensions:
   deepseek_v4:
     enabled: true
-provider:
-  providers:
-    openai:
-      base_url: https://openai.example.test
-      api_key: openai-key
-      protocol: openai-response
-      models:
-        gpt-image-1.5: {}
-  routes:
-    image: "openai/gpt-image-1.5"
+`,
+		"global deepseek extension on openai-response protocol": `
+mode: Transform
+models:
+  gpt-image-1.5: {}
+providers:
+  openai:
+    base_url: https://openai.example.test
+    api_key: openai-key
+    protocol: openai-response
+    offers:
+      - model: gpt-image-1.5
+routes:
+  image:
+    model: gpt-image-1.5
+    provider: openai
+extensions:
+  deepseek_v4:
+    enabled: true
 `,
 		"visual provider missing": `
 mode: Transform
+models:
+  deepseek-v4-pro:
+    extensions:
+      visual:
+        enabled: true
+providers:
+  deepseek:
+    base_url: https://deepseek.example.test
+    api_key: deepseek-key
+    offers:
+      - model: deepseek-v4-pro
+routes:
+  moonbridge:
+    model: deepseek-v4-pro
+    provider: deepseek
 extensions:
   visual:
     config:
       model: kimi-vision
-provider:
-  providers:
-    deepseek:
-      base_url: https://deepseek.example.test
-      api_key: deepseek-key
-      models:
-        deepseek-v4-pro:
-          extensions:
-            visual:
-              enabled: true
-  routes:
-    moonbridge: "deepseek/deepseek-v4-pro"
 `,
 		"visual provider on openai-response protocol": `
 mode: Transform
+models:
+  deepseek-v4-pro: {}
+  gpt-4o:
+    extensions:
+      visual:
+        enabled: true
+providers:
+  deepseek:
+    base_url: https://deepseek.example.test
+    api_key: deepseek-key
+    offers:
+      - model: deepseek-v4-pro
+  openai:
+    base_url: https://openai.example.test
+    api_key: openai-key
+    protocol: openai-response
+    offers:
+      - model: gpt-4o
+routes:
+  moonbridge:
+    model: deepseek-v4-pro
+    provider: deepseek
 extensions:
   visual:
     config:
       provider: openai
       model: gpt-4o
-provider:
-  providers:
-    deepseek:
-      base_url: https://deepseek.example.test
-      api_key: deepseek-key
-      models:
-        deepseek-v4-pro:
-          extensions:
-            visual:
-              enabled: true
-    openai:
-      base_url: https://openai.example.test
-      api_key: openai-key
-      protocol: openai-response
-  routes:
-    moonbridge: "deepseek/deepseek-v4-pro"
 `,
 	} {
 		t.Run(name, func(t *testing.T) {
@@ -463,17 +507,20 @@ provider:
 func TestLoadFromYAMLRejectsInvalidWebSearchSupport(t *testing.T) {
 	_, err := config.LoadFromYAML([]byte(`
 mode: Transform
-provider:
-  providers:
-    main:
-      base_url: https://provider.example.test
-      api_key: upstream-key
-      models:
-        claude-test: {}
-  routes:
-    moonbridge: "main/claude-test"
-  web_search:
-    support: sometimes
+models:
+  claude-test: {}
+providers:
+  main:
+    base_url: https://provider.example.test
+    api_key: upstream-key
+    offers:
+      - model: claude-test
+routes:
+  moonbridge:
+    model: claude-test
+    provider: main
+web_search:
+  support: sometimes
 `))
 	if err == nil {
 		t.Fatal("LoadFromYAML() error = nil, want invalid web search support error")
@@ -497,39 +544,41 @@ func TestLoadFromYAMLRejectsInvalidMode(t *testing.T) {
 func TestLoadFromYAMLParsesModelMetadata(t *testing.T) {
 	cfg, err := config.LoadFromYAML([]byte(`
 mode: Transform
-provider:
-  providers:
-    main:
-      base_url: https://provider.example.test
-      api_key: upstream-key
-      models:
-        claude-test:
-          context_window: 200000
-          max_output_tokens: 100000
-          display_name: "Claude Test"
-          description: "A test model"
-          default_reasoning_level: "medium"
-          supported_reasoning_levels:
-            - effort: "low"
-              description: "Fast"
-            - effort: "high"
-              description: "Deep"
-          supports_reasoning_summaries: true
-          default_reasoning_summary: "auto"
-  routes:
-    gpt-test: "main/claude-test"
+models:
+  claude-test:
+    context_window: 200000
+    max_output_tokens: 100000
+    display_name: "Claude Test"
+    description: "A test model"
+    default_reasoning_level: "medium"
+    supported_reasoning_levels:
+      - effort: "low"
+        description: "Fast"
+      - effort: "high"
+        description: "Deep"
+    supports_reasoning_summaries: true
+    default_reasoning_summary: "auto"
+providers:
+  main:
+    base_url: https://provider.example.test
+    api_key: upstream-key
+    offers:
+      - model: claude-test
+routes:
+  gpt-test:
+    model: claude-test
+    provider: main
 `))
 	if err != nil {
 		t.Fatalf("LoadFromYAML() error = %v", err)
 	}
 	route := cfg.RouteFor("gpt-test")
-	// Route DisplayName/Description are no longer auto-copied from upstream model.
-	// They should be empty unless explicitly set in route config.
-	if route.DisplayName != "" {
-		t.Fatalf("DisplayName = %q, want empty", route.DisplayName)
+	// Route DisplayName/Description come from model def in new format.
+	if route.DisplayName != "Claude Test" {
+		t.Fatalf("DisplayName = %q, want \"Claude Test\"", route.DisplayName)
 	}
-	if route.Description != "" {
-		t.Fatalf("Description = %q, want empty", route.Description)
+	if route.Description != "A test model" {
+		t.Fatalf("Description = %q, want \"A test model\"", route.Description)
 	}
 	if route.DefaultReasoningLevel != "medium" {
 		t.Fatalf("DefaultReasoningLevel = %q", route.DefaultReasoningLevel)
@@ -558,15 +607,18 @@ func TestLoadFromYAMLRequiresTransformProviderSettings(t *testing.T) {
 func TestLoadFromYAMLRejectsInvalidCacheTTL(t *testing.T) {
 	_, err := config.LoadFromYAML([]byte(`
 mode: Transform
-provider:
-  providers:
-    main:
-      base_url: https://provider.example.test
-      api_key: upstream-key
-      models:
-        claude-test: {}
-  routes:
-    gpt-test: "main/claude-test"
+models:
+  claude-test: {}
+providers:
+  main:
+    base_url: https://provider.example.test
+    api_key: upstream-key
+    offers:
+      - model: claude-test
+routes:
+  gpt-test:
+    model: claude-test
+    provider: main
 cache:
   ttl: 24h
 `))
@@ -578,30 +630,30 @@ cache:
 func TestLoadFromYAMLRejectsEmptyRouteModel(t *testing.T) {
 	_, err := config.LoadFromYAML([]byte(`
 mode: Transform
-provider:
-  providers:
-    main:
-      base_url: https://provider.example.test
-      api_key: upstream-key
-  routes:
-    moonbridge: "main/"
+providers:
+  main:
+    base_url: https://provider.example.test
+    api_key: upstream-key
+routes:
+  moonbridge:
+    model: ""
+    provider: main
 `))
 	if err == nil {
 		t.Fatal("LoadFromYAML() error = nil, want empty route model error")
 	}
 }
-func TestLoadFromYAMLParsesCaptureResponseConfig(t *testing.T) {
 
+func TestLoadFromYAMLParsesCaptureResponseConfig(t *testing.T) {
 	cfg, err := config.LoadFromYAML([]byte(`
 mode: CaptureResponse
-trace_requests: true
-developer:
-  proxy:
-    response:
-      model: gpt-capture
-      provider:
-        base_url: https://api.openai.example.test
-        api_key: upstream-openai-key
+trace:
+  enabled: true
+proxy:
+  response:
+    model: gpt-capture
+    base_url: https://api.openai.example.test
+    api_key: upstream-openai-key
 `))
 	if err != nil {
 		t.Fatalf("LoadFromYAML() error = %v", err)
@@ -623,15 +675,14 @@ developer:
 func TestLoadFromYAMLParsesCaptureAnthropicConfig(t *testing.T) {
 	cfg, err := config.LoadFromYAML([]byte(`
 mode: CaptureAnthropic
-trace_requests: true
-developer:
-  proxy:
-    anthropic:
-      model: claude-test
-      provider:
-        base_url: https://provider.example.test
-        api_key: upstream-key
-        version: 2023-06-01
+trace:
+  enabled: true
+proxy:
+  anthropic:
+    model: claude-test
+    base_url: https://provider.example.test
+    api_key: upstream-key
+    version: 2023-06-01
 `))
 	if err != nil {
 		t.Fatalf("LoadFromYAML() error = %v", err)
@@ -715,13 +766,11 @@ func TestOverrideAddrUsesSharedServerAddr(t *testing.T) {
 func TestLoadFromYAMLRejectsProxyAddr(t *testing.T) {
 	_, err := config.LoadFromYAML([]byte(`
 mode: CaptureResponse
-developer:
-  proxy:
-    response:
-      addr: 127.0.0.1:19180
-      provider:
-        base_url: https://api.openai.example.test
-        api_key: upstream-openai-key
+proxy:
+  response:
+    addr: 127.0.0.1:19180
+    base_url: https://api.openai.example.test
+    api_key: upstream-openai-key
 `))
 	if err == nil {
 		t.Fatal("LoadFromYAML() error = nil, want unknown proxy addr error")
@@ -766,5 +815,168 @@ func TestDumpConfigSchemaSkipsMissingPluginDir(t *testing.T) {
 	schemaPath := filepath.Join(dir, "config.schema.json")
 	if _, err := os.Stat(schemaPath); err != nil {
 		t.Fatalf("main schema not found: %v", err)
+	}
+}
+
+func TestLoadFromYAMLBackwardCompatTraceRequests(t *testing.T) {
+	cfg, err := config.LoadFromYAML([]byte(`
+mode: Transform
+models:
+  claude-test: {}
+providers:
+  main:
+    base_url: https://provider.example.test
+    api_key: upstream-key
+    offers:
+      - model: claude-test
+routes:
+  gpt-test:
+    model: claude-test
+    provider: main
+trace_requests: true
+`))
+	if err != nil {
+		t.Fatalf("LoadFromYAML() error = %v", err)
+	}
+	if !cfg.TraceRequests {
+		t.Fatal("TraceRequests = false, want true")
+	}
+}
+
+func TestLoadFromYAMLParsesOffersWithPricing(t *testing.T) {
+	cfg, err := config.LoadFromYAML([]byte(`
+mode: Transform
+models:
+  claude-sonnet:
+    context_window: 200000
+    max_output_tokens: 64000
+    display_name: "Claude Sonnet"
+providers:
+  anthropic:
+    base_url: https://api.anthropic.com
+    api_key: sk-xxx
+    offers:
+      - model: claude-sonnet
+        upstream_name: claude-sonnet-4-20250514
+        pricing:
+          input_price: 3.0
+          output_price: 15.0
+          cache_write_price: 3.75
+          cache_read_price: 0.30
+routes:
+  sonnet:
+    model: claude-sonnet
+    provider: anthropic
+`))
+	if err != nil {
+		t.Fatalf("LoadFromYAML() error = %v", err)
+	}
+	if cfg.Models["claude-sonnet"].ContextWindow != 200000 {
+		t.Fatalf("Model context_window = %d", cfg.Models["claude-sonnet"].ContextWindow)
+	}
+	if cfg.Models["claude-sonnet"].DisplayName != "Claude Sonnet" {
+		t.Fatalf("Model DisplayName = %q", cfg.Models["claude-sonnet"].DisplayName)
+	}
+	if cfg.ProviderDefs["anthropic"].Offers[0].UpstreamName != "claude-sonnet-4-20250514" {
+		t.Fatalf("Offer UpstreamName = %q", cfg.ProviderDefs["anthropic"].Offers[0].UpstreamName)
+	}
+	if cfg.ProviderDefs["anthropic"].Offers[0].Pricing.InputPrice != 3.0 {
+		t.Fatalf("Offer InputPrice = %f", cfg.ProviderDefs["anthropic"].Offers[0].Pricing.InputPrice)
+	}
+	offerModel, ok := cfg.ProviderDefs["anthropic"].Models["claude-sonnet-4-20250514"]
+	if !ok {
+		t.Fatal("Provider model claude-sonnet-4-20250514 not found")
+	}
+	if offerModel.InputPrice != 3.0 {
+		t.Fatalf("Provider model InputPrice = %f", offerModel.InputPrice)
+	}
+	if offerModel.ContextWindow != 200000 {
+		t.Fatalf("Provider model ContextWindow = %d", offerModel.ContextWindow)
+	}
+	// Route should use upstream name.
+	route := cfg.RouteFor("sonnet")
+	if route.Model != "claude-sonnet-4-20250514" {
+		t.Fatalf("Route Model = %q, want claude-sonnet-4-20250514", route.Model)
+	}
+	if route.InputPrice != 3.0 {
+		t.Fatalf("Route InputPrice = %f", route.InputPrice)
+	}
+	if route.ContextWindow != 200000 {
+		t.Fatalf("Route ContextWindow = %d", route.ContextWindow)
+	}
+}
+
+func TestLoadFromYAMLDefaultsModelConfig(t *testing.T) {
+	cfg, err := config.LoadFromYAML([]byte(`
+mode: Transform
+models:
+  claude-test:
+    context_window: 200000
+providers:
+  main:
+    base_url: https://provider.example.test
+    api_key: upstream-key
+    offers:
+      - model: claude-test
+routes:
+  gpt-test:
+    model: claude-test
+    provider: main
+defaults:
+  model: gpt-test
+  max_tokens: 4096
+  system_prompt: "You are a test assistant"
+cache:
+  mode: off
+`))
+	if err != nil {
+		t.Fatalf("LoadFromYAML() error = %v", err)
+	}
+	if cfg.Defaults.Model != "gpt-test" {
+		t.Fatalf("Defaults.Model = %q", cfg.Defaults.Model)
+	}
+	if cfg.Defaults.MaxTokens != 4096 {
+		t.Fatalf("Defaults.MaxTokens = %d", cfg.Defaults.MaxTokens)
+	}
+	if cfg.Defaults.SystemPrompt != "You are a test assistant" {
+		t.Fatalf("Defaults.SystemPrompt = %q", cfg.Defaults.SystemPrompt)
+	}
+	if cfg.DefaultMaxTokens != 4096 {
+		t.Fatalf("DefaultMaxTokens = %d", cfg.DefaultMaxTokens)
+	}
+	if cfg.DefaultModel != "gpt-test" {
+		t.Fatalf("DefaultModel = %q", cfg.DefaultModel)
+	}
+	if cfg.SystemPrompt != "You are a test assistant" {
+		t.Fatalf("SystemPrompt = %q", cfg.SystemPrompt)
+	}
+}
+
+func TestLoadFromYAMLRouteBackwardCompatToField(t *testing.T) {
+	cfg, err := config.LoadFromYAML([]byte(`
+mode: Transform
+models:
+  claude-test:
+    context_window: 200000
+providers:
+  main:
+    base_url: https://provider.example.test
+    api_key: upstream-key
+    offers:
+      - model: claude-test
+routes:
+  gpt-test: "main/claude-test"
+`))
+	if err != nil {
+		t.Fatalf("LoadFromYAML() error = %v", err)
+	}
+	if cfg.RouteFor("gpt-test").Provider != "main" {
+		t.Fatalf("Route provider = %q", cfg.RouteFor("gpt-test").Provider)
+	}
+	if cfg.RouteFor("gpt-test").Model != "claude-test" {
+		t.Fatalf("Route model = %q", cfg.RouteFor("gpt-test").Model)
+	}
+	if cfg.RouteFor("gpt-test").ContextWindow != 200000 {
+		t.Fatalf("Route ContextWindow = %d", cfg.RouteFor("gpt-test").ContextWindow)
 	}
 }

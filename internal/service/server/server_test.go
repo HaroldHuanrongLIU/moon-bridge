@@ -457,11 +457,11 @@ func TestBuildModelInfosFromConfigIncludesProviderModelsBeforeRouteFallback(t *t
 	for _, model := range models {
 		slugs = append(slugs, model.Slug)
 	}
-	want := []string{"model-a(p1)", "model-b(p1)", "model-c(p2)", "alias-a", "p1/model-a"}
+	want := []string{"model-a", "model-b", "model-c", "alias-a", "p1/model-a"}
 	if strings.Join(slugs, ",") != strings.Join(want, ",") {
 		t.Fatalf("slugs = %v, want %v", slugs, want)
 	}
-	if models[0].DisplayName != "Model A(p1)" || models[0].ContextWindow == nil || *models[0].ContextWindow != 1000 {
+	if models[0].DisplayName != "Model A" || models[0].ContextWindow == nil || *models[0].ContextWindow != 1000 {
 		t.Fatalf("provider metadata not preserved: %+v", models[0])
 	}
 }
@@ -1190,3 +1190,4 @@ func addAuth(req *http.Request, value string) *http.Request {
 	req.Header.Set("Authorization", value)
 	return req
 }
+

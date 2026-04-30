@@ -48,8 +48,8 @@ func TestBuildModelInfosFromConfigIncludesProviderModelsBeforeRouteFallback(t *t
 	if len(models) != 1 {
 		t.Fatalf("expected 1 model (model(provider) only), got %d", len(models))
 	}
-	if models[0].Slug != "gpt-4o(openai)" {
-		t.Fatalf("slug[0] = %q, want gpt-4o(openai)", models[0].Slug)
+	if models[0].Slug != "gpt-4o" {
+		t.Fatalf("slug[0] = %q, want gpt-4o", models[0].Slug)
 	}
 }
 
@@ -123,6 +123,160 @@ func TestGenerateConfigTomlIncludesDeepWikiMCPServer(t *testing.T) {
 }
 
 
+func TestBuildModelInfosFromConfig_DeduplicatesSameModelAcrossProviders(t *testing.T) {
+	models := codex.BuildModelInfosFromConfig(config.Config{
+		ProviderDefs: map[string]config.ProviderDef{
+			"provider-a": {
+				Models: map[string]config.ModelMeta{
+					"claude-sonnet-4-5": {ContextWindow: 100000, Description: "From A"},
+				},
+			},
+			"provider-b": {
+				Models: map[string]config.ModelMeta{
+					"claude-sonnet-4-5": {ContextWindow: 200000, Description: "From B"},
+				},
+			},
+		},
+	})
+	if len(models) != 1 {
+		t.Fatalf("expected 1 deduplicated model, got %d", len(models))
+	}
+	if models[0].Slug != "claude-sonnet-4-5" {
+		t.Fatalf("slug = %q, want claude-sonnet-4-5", models[0].Slug)
+	}
+	// Preferred provider (provider-a) has description "From A".
+	if models[0].Description != "From A" {
+		t.Fatalf("description = %q, want From A", models[0].Description)
+	}
+}
+
+func TestBuildModelInfosFromConfig_DifferentModelsEmittedSeparately(t *testing.T) {
+	models := codex.BuildModelInfosFromConfig(config.Config{
+		ProviderDefs: map[string]config.ProviderDef{
+			"provider-a": {
+				Models: map[string]config.ModelMeta{
+					"model-alpha": {},
+				},
+			},
+			"provider-b": {
+				Models: map[string]config.ModelMeta{
+					"model-beta": {},
+				},
+			},
+		},
+	})
+	if len(models) != 2 {
+		t.Fatalf("expected 2 distinct models, got %d", len(models))
+	}
+	if models[0].Slug != "model-alpha" || models[1].Slug != "model-beta" {
+		t.Fatalf("slugs = %q / %q, want model-alpha / model-beta", models[0].Slug, models[1].Slug)
+	}
+}
+
+func TestBuildModelInfosFromConfig_MetadataMergeTakesMaxContextWindow(t *testing.T) {
+	models := codex.BuildModelInfosFromConfig(config.Config{
+		ProviderDefs: map[string]config.ProviderDef{
+			"provider-a": {
+				Models: map[string]config.ModelMeta{
+					"model-x": {ContextWindow: 100000},
+				},
+			},
+			"provider-b": {
+				Models: map[string]config.ModelMeta{
+					"model-x": {ContextWindow: 500000},
+				},
+			},
+		},
+	})
+	if len(models) != 1 {
+		t.Fatalf("expected 1 model, got %d", len(models))
+	}
+	if models[0].ContextWindow == nil || *models[0].ContextWindow != 500000 {
+		t.Fatalf("ContextWindow = %v, want 500000", models[0].ContextWindow)
+	}
+}
+
+func TestBuildModelInfosFromConfig_MetadataMergeUnionModalities(t *testing.T) {
+	models := codex.BuildModelInfosFromConfig(config.Config{
+		ProviderDefs: map[string]config.ProviderDef{
+			"provider-a": {
+				Models: map[string]config.ModelMeta{
+					"model-x": {InputModalities: []string{"text"}},
+				},
+			},
+			"provider-b": {
+				Models: map[string]config.ModelMeta{
+					"model-x": {InputModalities: []string{"text", "image"}},
+				},
+			},
+		},
+	})
+	if len(models) != 1 {
+		t.Fatalf("expected 1 model, got %d", len(models))
+	}
+	// Union should include both text and image; order is sorted.
+	if len(models[0].InputModalities) != 2 {
+		t.Fatalf("InputModalities = %v, want 2 entries", models[0].InputModalities)
+	}
+	hasText, hasImage := false, false
+	for _, m := range models[0].InputModalities {
+		if m == "text" {
+			hasText = true
+		}
+		if m == "image" {
+			hasImage = true
+		}
+	}
+	if !hasText || !hasImage {
+		t.Fatalf("InputModalities = %v, missing text and/or image", models[0].InputModalities)
+	}
+}
+
+func TestBuildModelInfosFromConfig_ReasoningLevelsDeduplicatedByEffort(t *testing.T) {
+	models := codex.BuildModelInfosFromConfig(config.Config{
+		ProviderDefs: map[string]config.ProviderDef{
+			"provider-a": {
+				Models: map[string]config.ModelMeta{
+					"model-x": {
+						SupportedReasoningLevels: []config.ReasoningLevelPreset{
+							{Effort: "high", Description: "A High"},
+							{Effort: "low", Description: "A Low"},
+						},
+					},
+				},
+			},
+			"provider-b": {
+				Models: map[string]config.ModelMeta{
+					"model-x": {
+						SupportedReasoningLevels: []config.ReasoningLevelPreset{
+							{Effort: "high", Description: "B High"},
+							{Effort: "xhigh", Description: "B XHigh"},
+						},
+					},
+				},
+			},
+		},
+	})
+	if len(models) != 1 {
+		t.Fatalf("expected 1 model, got %d", len(models))
+	}
+	levels := models[0].SupportedReasoningLevels
+	if len(levels) != 3 {
+		t.Fatalf("SupportedReasoningLevels = %+v, want 3 levels", levels)
+	}
+	// High should use preferred provider's description (A High).
+	if levels[0].Effort != "high" || levels[0].Description != "A High" {
+		t.Fatalf("levels[0] = %+v, want effort=high description=A High", levels[0])
+	}
+	// Low from preferred provider.
+	if levels[1].Effort != "low" || levels[1].Description != "A Low" {
+	t.Fatalf("levels[1] = %+v, want effort=low description=A Low", levels[1])
+	}
+	// Xhigh should come from provider-b since it's a new effort.
+	if levels[2].Effort != "xhigh" || levels[2].Description != "B XHigh" {
+	t.Fatalf("levels[2] = %+v, want effort=xhigh description=B XHigh", levels[2])
+	}
+}
 func TestGenerateConfigTomlNormalizesDirectProviderModelRef(t *testing.T) {
 	var output bytes.Buffer
 	cfg := config.Config{
@@ -226,8 +380,8 @@ func TestGenerateConfigTomlCodexHomeContainsNormalizedSlug(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ReadFile() error = %v", err)
 	}
-	if !strings.Contains(string(raw), `"slug": "deepseek-v4-pro(deepseek)"`) {
-		t.Fatalf("catalog missing normalized slug:\n%s", string(raw))
+	if !strings.Contains(string(raw), `"slug": "deepseek-v4-pro"`) {
+		t.Fatalf("catalog missing pure model name slug:\n%s", string(raw))
 	}
 	// The config should reference the normalized slug.
 	generated := output.String()
