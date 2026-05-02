@@ -47,10 +47,10 @@ func NewOrchestrator(cfg OrchestratorConfig) *Orchestrator {
 	}
 }
 
-func WrapProvider(upstream Provider, visualProvider Provider, model string, maxRounds int, maxTokens int) Provider {
+func WrapProvider(upstream Provider, visualCfg ClientConfig, maxRounds int) Provider {
 	return NewOrchestrator(OrchestratorConfig{
 		Upstream:  upstream,
-		Visual:    ClientConfig{Provider: visualProvider, Model: model, MaxTokens: maxTokens},
+		Visual:    visualCfg,
 		MaxRounds: maxRounds,
 	})
 }

@@ -43,9 +43,9 @@ type Config struct {
 	TraceErrors      io.Writer
 	Stats            *stats.SessionStats
 	PluginRegistry   *plugin.Registry
-	AppConfig        config.Config // full app config for per-provider resolution
-	Runtime  *runtime.Runtime  // optional; when set, Current().Config takes priority over AppConfig
-	Store    store.ConfigStore  // optional; API management endpoints
+	AppConfig        config.Config     // full app config for per-provider resolution
+	Runtime          *runtime.Runtime  // optional; when set, Current().Config takes priority over AppConfig
+	Store            store.ConfigStore // optional; API management endpoints
 }
 
 type Server struct {
@@ -148,12 +148,12 @@ func (server *Server) currentConfig() config.Config {
 	return server.appConfig
 }
 
-
 // CurrentConfig returns an interface for reading the effective config.
 // Satisfies the api.ConfigAccessor interface expected by api.NewRouter.
 func (server *Server) CurrentConfig() api.ConfigAccessor {
 	return server
 }
+
 // AuthToken returns the current authentication token.
 // Satisfies the api.ConfigAccessor interface.
 func (server *Server) AuthToken() string {
@@ -283,7 +283,69 @@ func (server *Server) maybeWrapVisual(provider Provider, modelAlias string) Prov
 	}
 	visualProvider := server.visualProvider(visualCfg)
 	slog.Default().Debug("Wrapping Visual orchestrator", "model", modelAlias, "visual_model", visualCfg.Model)
-	return visual.WrapProvider(provider, visualProvider, visualCfg.Model, visualCfg.MaxRounds, visualCfg.MaxTokens)
+	return visual.WrapProvider(provider, visual.ClientConfig{
+		Provider:        visualProvider,
+		Model:           visualCfg.Model,
+		MetricsModel:    visualMetricsModel(visualCfg),
+		MaxTokens:       visualCfg.MaxTokens,
+		MetricsRecorder: server.recordVisualToolCall,
+	}, visualCfg.MaxRounds)
+}
+
+func visualMetricsModel(cfg visual.Config) string {
+	if cfg.Provider != "" && cfg.Model != "" {
+		return cfg.Provider + "/" + cfg.Model
+	}
+	return cfg.Model
+}
+
+func (server *Server) recordVisualToolCall(metric visual.ToolCallMetrics) {
+	model := strings.TrimSpace(metric.Model)
+	actualModel := strings.TrimSpace(metric.ActualModel)
+	if model == "" {
+		model = actualModel
+	}
+	if actualModel == "" {
+		actualModel = model
+	}
+
+	billingUsage := billingUsageFromAnthropic(metric.Usage)
+	hasUsage := billingUsage.InputTokens() > 0 || billingUsage.OutputTokens > 0
+	if hasUsage {
+		if server.stats != nil {
+			server.stats.RecordBilling(model, actualModel, billingUsage)
+		}
+		logBillingUsageLine(model, actualModel, billingUsage, server.stats)
+	}
+	if server.pluginRegistry == nil {
+		return
+	}
+
+	status := metric.Status
+	if status == "" {
+		status = "success"
+	}
+	telemetry := usageFromAnthropic("anthropic", "visual_tool_call", metric.Usage, false)
+	cost := float64(0)
+	if server.stats != nil && hasUsage {
+		cost = server.stats.ComputeBillingCost(model, billingUsage)
+	}
+	server.pluginRegistry.OnRequestCompleted(
+		&plugin.RequestContext{ModelAlias: model},
+		plugin.RequestResult{
+			Model:         model,
+			ActualModel:   actualModel,
+			InputTokens:   telemetry.NormalizedInputTokens,
+			OutputTokens:  telemetry.NormalizedOutputTokens,
+			CacheCreation: telemetry.NormalizedCacheCreation,
+			CacheRead:     telemetry.NormalizedCacheRead,
+			Cost:          cost,
+			Duration:      metric.Duration,
+			Status:        status,
+			ErrorMessage:  metric.ErrorMessage,
+			Usage:         telemetry,
+		},
+	)
 }
 
 func (server *Server) visualProvider(cfg visual.Config) Provider {
