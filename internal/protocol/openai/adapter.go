@@ -199,7 +199,7 @@ func (a *OpenAIAdapter) FromCoreResponse(ctx context.Context, resp *format.CoreR
 					ID:        block.ToolUseID,
 					CallID:    block.ToolUseID,
 					Name:      block.ToolName,
-					Arguments: string(block.ToolInput),
+					Arguments: toolInputString(block.ToolInput),
 					Status:    "completed",
 				})
 
@@ -364,7 +364,7 @@ func (a *OpenAIAdapter) streamLoop(ctx context.Context, coreReq *format.CoreRequ
 					ID:        toolUseID,
 					CallID:    toolUseID,
 					Name:      event.ContentBlock.ToolName,
-					Arguments: string(event.ContentBlock.ToolInput),
+					Arguments: toolInputString(event.ContentBlock.ToolInput),
 					Status:    "in_progress",
 				}
 				outputIndexes[index] = len(response.Output)
@@ -962,4 +962,13 @@ func copyContentBlocks(blocks []format.CoreContentBlock) []format.CoreContentBlo
 // cloneResponse creates a shallow copy of a Response for use in stream events.
 func cloneResponse(r *Response) Response {
 	return *r
+}
+
+// toolInputString converts a json.RawMessage tool input to a string,
+// defaulting to "{}" when the input is nil or null.
+func toolInputString(input json.RawMessage) string {
+	if len(input) == 0 || string(input) == "null" {
+		return "{}"
+	}
+	return string(input)
 }
