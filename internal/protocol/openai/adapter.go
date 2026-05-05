@@ -718,10 +718,7 @@ func (a *OpenAIAdapter) streamLoop(ctx context.Context, coreReq *format.CoreRequ
 		// Ping
 		// ==================================================================
 		case format.CorePing:
-			send(StreamEvent{
-				Event: "ping",
-				Data:  nil,
-			})
+			// Anthropic keepalive — no OpenAI equivalent. Silently skip.
 		}
 	}
 
