@@ -123,7 +123,7 @@ func (a *AnthropicProviderAdapter) FromCoreRequest(ctx context.Context, req *for
 		anthropicReq.Tools = append(anthropicReq.Tools, Tool{
 			Name:        t.Name,
 			Description: t.Description,
-			InputSchema: t.InputSchema,
+			InputSchema: cleanSchema(t.InputSchema),
 			})
 		}
 	}
@@ -707,4 +707,41 @@ func (a *AnthropicProviderAdapter) StreamBuffer() []StreamEvent {
 	a.streamMu.Lock()
 	defer a.streamMu.Unlock()
 	return a.streamEvents
+}
+
+// cleanSchema recursively removes nil values from a JSON schema map.
+// DeepSeek rejects null values in schema properties.
+func cleanSchema(schema map[string]any) map[string]any {
+	if schema == nil {
+		return nil
+	}
+	result := make(map[string]any, len(schema))
+	for k, v := range schema {
+		switch val := v.(type) {
+		case nil:
+			continue // skip nil values
+		case map[string]any:
+			cleaned := cleanSchema(val)
+			if len(cleaned) > 0 {
+				result[k] = cleaned
+			}
+		case []any:
+			cleaned := make([]any, 0, len(val))
+			for _, item := range val {
+				if itemMap, ok := item.(map[string]any); ok {
+					if c := cleanSchema(itemMap); len(c) > 0 {
+						cleaned = append(cleaned, c)
+					}
+				} else if item != nil {
+					cleaned = append(cleaned, item)
+				}
+			}
+			if len(cleaned) > 0 {
+				result[k] = cleaned
+			}
+		default:
+			result[k] = v
+		}
+	}
+	return result
 }
