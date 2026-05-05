@@ -191,7 +191,7 @@ func (s *Server) handleWithAdapters(
 	}
 
 	// Inject web_search tool if enabled for this model.
-	if s.providerMgr.ResolvedWebSearchForModel(openAIReq.Model) == "enabled" {
+	if s.providerMgr.ResolvedWebSearch(preferred.ProviderKey) == "enabled" {
 		injectAnthropicWebSearch(upstreamReq)
 	}
 
