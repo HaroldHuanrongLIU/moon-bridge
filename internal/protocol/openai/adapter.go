@@ -36,8 +36,6 @@ type OpenAIAdapter struct {
 
 	streamMu         sync.Mutex
 	streamEvents     []StreamEvent
-	streamEventsSize int
-	maxStreamBuffer  int
 }
 
 // NewOpenAIAdapter creates a new OpenAIAdapter with the given config and hooks.
@@ -45,7 +43,6 @@ func NewOpenAIAdapter(cfg config.Config, hooks format.CorePluginHooks) *OpenAIAd
 	return &OpenAIAdapter{
 		cfg:      cfg,
 		hooks:    hooks.WithDefaults(),
-		maxStreamBuffer: 4 * 1024 * 1024,
 	}
 }
 
@@ -294,16 +291,7 @@ func (a *OpenAIAdapter) FromCoreStream(ctx context.Context, req *format.CoreRequ
 func (a *OpenAIAdapter) bufferStreamEvent(ev StreamEvent) {
 	a.streamMu.Lock()
 	defer a.streamMu.Unlock()
-	if a.streamEventsSize >= a.maxStreamBuffer {
-		return // buffer full, skip
-	}
-	data, err := json.Marshal(ev)
-	if err == nil {
-		a.streamEventsSize += len(data)
-		if a.streamEventsSize <= a.maxStreamBuffer {
-			a.streamEvents = append(a.streamEvents, ev)
-		}
-	}
+	a.streamEvents = append(a.streamEvents, ev)
 }
 
 // StreamBuffer returns the buffered stream events for trace capture.

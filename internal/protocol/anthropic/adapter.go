@@ -2,7 +2,6 @@ package anthropic
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"io"
 	"sync"
@@ -50,8 +49,6 @@ type AnthropicProviderAdapter struct {
 
 	streamMu         sync.Mutex
 	streamEvents     []StreamEvent
-	streamEventsSize int
-	maxStreamBuffer  int
 }
 
 // NewAnthropicProviderAdapter creates a new AnthropicProviderAdapter.
@@ -63,7 +60,6 @@ func NewAnthropicProviderAdapter(cfg config.Config, cacheMgr CacheManager, hooks
 		cfg:      cfg,
 		cacheMgr: cacheMgr,
 		hooks:    hooks.WithDefaults(),
-		maxStreamBuffer: 4 * 1024 * 1024,
 	}
 }
 
@@ -229,7 +225,6 @@ func (a *AnthropicProviderAdapter) ToCoreStream(ctx context.Context, src any) (<
 	// Initialize stream event buffer for trace capture.
 	a.streamMu.Lock()
 	a.streamEvents = make([]StreamEvent, 0, 64)
-	a.streamEventsSize = 0
 	a.streamMu.Unlock()
 
 	go func() {
@@ -704,16 +699,7 @@ func (a *AnthropicProviderAdapter) mapStopReasonToStatus(reason string) string {
 func (a *AnthropicProviderAdapter) bufferStreamEvent(ev StreamEvent) {
 	a.streamMu.Lock()
 	defer a.streamMu.Unlock()
-	if a.streamEventsSize >= a.maxStreamBuffer {
-		return // buffer full, skip
-	}
-	data, err := json.Marshal(ev)
-	if err == nil {
-		a.streamEventsSize += len(data)
-		if a.streamEventsSize <= a.maxStreamBuffer {
-			a.streamEvents = append(a.streamEvents, ev)
-		}
-	}
+	a.streamEvents = append(a.streamEvents, ev)
 }
 
 // StreamBuffer returns the buffered stream events for trace capture.
@@ -722,4 +708,3 @@ func (a *AnthropicProviderAdapter) StreamBuffer() []StreamEvent {
 	defer a.streamMu.Unlock()
 	return a.streamEvents
 }
-
