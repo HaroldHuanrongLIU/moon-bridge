@@ -711,6 +711,7 @@ func (a *AnthropicProviderAdapter) StreamBuffer() []StreamEvent {
 
 // cleanSchema recursively removes nil values from a JSON schema map.
 // DeepSeek rejects null values in schema properties.
+// Returns a default schema {"type":"object"} when no keys remain.
 func cleanSchema(schema map[string]any) map[string]any {
 	if schema == nil {
 		return nil
@@ -742,6 +743,9 @@ func cleanSchema(schema map[string]any) map[string]any {
 		default:
 			result[k] = v
 		}
+	}
+	if len(result) == 0 {
+		return map[string]any{"type": "object"}
 	}
 	return result
 }
