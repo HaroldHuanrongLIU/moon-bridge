@@ -511,19 +511,6 @@ func (r *Registry) CorePluginHooks() format.CorePluginHooks {
 		if rmem, ok := p.(CoreContentRememberer); ok {
 			prev := hooks.RememberContent
 			hooks.RememberContent = func(ctx context.Context, content []format.CoreContentBlock) {
-
-	// Filter reasoning content blocks from stream events.
-	prevOnEvent := hooks.OnStreamEvent
-	hooks.OnStreamEvent = func(ctx context.Context, event format.CoreStreamEvent) bool {
-		if prevOnEvent(ctx, event) {
-			return true
-		}
-		// Reasoning blocks are internal model thinking; skip for real-time output.
-		if event.ContentBlock != nil && event.ContentBlock.Type == "reasoning" {
-			return true
-		}
-		return false
-	}
 				if prev != nil { prev(ctx, content) }
 				rmem.RememberCoreContent(ctx, content)
 			}
