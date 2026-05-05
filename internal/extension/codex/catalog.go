@@ -15,6 +15,7 @@ import (
 
 	"moonbridge/internal/extension/visual"
 	"moonbridge/internal/foundation/config"
+	"moonbridge/internal/foundation/modelref"
 )
 
 // ModelInfo represents a model entry in the OpenAI /v1/models response.
@@ -445,8 +446,10 @@ func valueOrDefault(value string, fallback string) string {
 func GenerateConfigToml(output io.Writer, modelAlias string, baseURL string, codexHome string, cfg config.Config) error {
 	route := cfg.RouteFor(modelAlias)
 
-	// When modelAlias is a direct provider/model reference (not a named route),
-	// normalize to model(provider) format so Codex can match it against catalog slugs.
+	// Strip provider prefix to match catalog slugs.
+	if provider, m := modelref.Parse(modelAlias); provider != "" {
+		modelAlias = m
+	}
 	catalogAlias := modelAlias
 	fmt.Fprintf(output, "model = %q\n", catalogAlias)
 	fmt.Fprintln(output, `model_provider = "moonbridge"`)
