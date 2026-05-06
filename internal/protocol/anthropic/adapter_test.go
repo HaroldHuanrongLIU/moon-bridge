@@ -177,11 +177,10 @@ func TestFromCoreRequest_Tools(t *testing.T) {
 	if msgReq.Tools[0].Name != "get_weather" {
 		t.Errorf("tool name = %q", msgReq.Tools[0].Name)
 	}
-	if msgReq.Tools[0].Type != "custom" {
-		t.Errorf("tool type = %q, want custom", msgReq.Tools[0].Type)
+	if msgReq.Tools[0].Type != "" {
+		t.Errorf("tool type = %q, want empty (Anthropic custom tools have no type field)", msgReq.Tools[0].Type)
 	}
 }
-
 func TestFromCoreRequest_ImageMessage(t *testing.T) {
 	adapter := newTestAdapter()
 

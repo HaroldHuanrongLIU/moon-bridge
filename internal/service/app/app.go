@@ -15,6 +15,8 @@ import (
 	"moonbridge/internal/service/store"
 	"moonbridge/internal/foundation/logger"
 	"moonbridge/internal/protocol/anthropic"
+	"moonbridge/internal/protocol/google"
+	"moonbridge/internal/protocol/chat"
 	"moonbridge/internal/protocol/cache"
 	"moonbridge/internal/protocol/format"
 	"moonbridge/internal/protocol/openai"
@@ -184,6 +186,16 @@ func runTransform(ctx context.Context, cfg config.Config, errors io.Writer) erro
 	anthAdapter := anthropic.NewAnthropicProviderAdapter(cfg, cacheMgr, coreHooks)
 	_ = adapterReg.RegisterProvider(anthAdapter)
 	_ = adapterReg.RegisterProviderStream(anthAdapter)
+
+	// Upstream: Google GenAI provider adapter.
+	googleAdapter := google.NewGeminiProviderAdapter(cfg, nil, coreHooks)
+	_ = adapterReg.RegisterProvider(googleAdapter)
+	_ = adapterReg.RegisterProviderStream(googleAdapter)
+
+	// Upstream: OpenAI Chat provider adapter.
+	chatAdapter := chat.NewChatProviderAdapter(cfg, nil, coreHooks)
+	_ = adapterReg.RegisterProvider(chatAdapter)
+	_ = adapterReg.RegisterProviderStream(chatAdapter)
 
 	slog.Info("Adapter dispatch path enabled", "registry", "format.Registry")
 

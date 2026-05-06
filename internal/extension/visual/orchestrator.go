@@ -93,7 +93,7 @@ func (o *Orchestrator) CreateMessage(ctx context.Context, req anthropic.MessageR
 			Role:    "user",
 			Content: toolResults,
 		})
-		req.ToolChoice = anthropic.ToolChoice{Type: "auto"}
+		req.ToolChoice = &anthropic.ToolChoice{Type: "auto"}
 		log.Debug("Visual tool loop completed", "round", round+1, "tools_executed", len(toolUses))
 	}
 	return anthropic.MessageResponse{}, fmt.Errorf("visual loop exceeded max rounds (%d)", o.maxRounds)
@@ -153,7 +153,7 @@ func (o *Orchestrator) StreamMessage(ctx context.Context, req anthropic.MessageR
 			Role:    "user",
 			Content: toolResults,
 		})
-		req.ToolChoice = anthropic.ToolChoice{Type: "auto"}
+		req.ToolChoice = &anthropic.ToolChoice{Type: "auto"}
 		log.Debug("Visual stream tool loop completed", "round", round+1, "tools_executed", len(toolUses))
 	}
 	return nil, fmt.Errorf("stream visual loop exceeded max rounds (%d)", o.maxRounds)

@@ -130,6 +130,17 @@ type CoreRequest struct {
 	// Streaming
 	Stream bool `json:"stream,omitempty"`
 
+	// Phase 5: Gemini safety/generation config support (D-02).
+	// SafetySettings holds protocol-normalized safety configuration.
+	// ProviderAdapters for Gemini read this and map to Gemini's safetySettings.
+	// Zero value (nil) = not set — adapter uses provider defaults.
+	SafetySettings map[string]any `json:"safety_settings,omitempty"`
+
+	// GenerationConfig holds protocol-normalized generation configuration.
+	// ProviderAdapters for Gemini read this and map to Gemini's generationConfig.
+	// Zero value (nil) = not set — adapter uses provider defaults.
+	GenerationConfig map[string]any `json:"generation_config,omitempty"`
+
 	// Metadata and extensions
 	Metadata   map[string]any `json:"metadata,omitempty"`
 	Extensions map[string]any `json:"extensions,omitempty"`
@@ -238,6 +249,12 @@ type CoreStreamEvent struct {
 	StopReason string     `json:"stop_reason,omitempty"`
 	Usage      *CoreUsage `json:"usage,omitempty"`
 	ItemID     string     `json:"item_id,omitempty"`
+
+	// ChoiceIndex identifies which candidate/choice this event belongs to.
+	// Used by Gemini (multi-candidate streaming) and OpenAI Chat (multi-choice).
+	// nil = single candidate / not applicable.
+	// Phase 5: multi-candidate streaming support (D-06).
+	ChoiceIndex *int `json:"choice_index,omitempty"`
 
 	// Protocol-specific extensions
 	Extensions map[string]any `json:"extensions,omitempty"`

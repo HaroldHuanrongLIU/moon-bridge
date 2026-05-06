@@ -1,0 +1,609 @@
+// Package google implements the Google Generative AI (Gemini) ProviderAdapter for MoonBridge.
+//
+// GeminiProviderAdapter converts between Core format and Gemini REST API DTOs.
+// It implements format.ProviderAdapter (non-streaming) and format.ProviderStreamAdapter (streaming).
+package google
+
+import (
+	"context"
+	"encoding/json"
+	"fmt"
+	"sync"
+
+	"moonbridge/internal/foundation/config"
+	"moonbridge/internal/protocol/format"
+)
+
+// ============================================================================
+// GeminiProviderAdapter
+// ============================================================================
+
+// GeminiProviderAdapter converts Core format requests/responses to/from
+// the Google Gemini API format.
+//
+// Clean room: no dependency on protocol-specific packages beyond google/.
+// Only references: config, format, and google types.
+type GeminiProviderAdapter struct {
+	cfg   config.Config
+	client *Client
+	hooks format.CorePluginHooks
+
+	streamMu      sync.Mutex
+	prevSnapshots map[int]string // candidate index → previous text for delta computation
+}
+
+// NewGeminiProviderAdapter creates a new GeminiProviderAdapter.
+//
+// client is the HTTP client for Gemini API calls. May be nil if the adapter
+// is registered for type conversion only (dispatch layer manages the client).
+func NewGeminiProviderAdapter(cfg config.Config, client *Client, hooks format.CorePluginHooks) *GeminiProviderAdapter {
+	return &GeminiProviderAdapter{
+		cfg:           cfg,
+		client:        client,
+		hooks:         hooks.WithDefaults(),
+		prevSnapshots: make(map[int]string),
+	}
+}
+
+// ProviderProtocol returns "google-genai".
+func (a *GeminiProviderAdapter) ProviderProtocol() string {
+	return config.ProtocolGoogleGenAI
+}
+
+// =========================================================================
+// FromCoreRequest — CoreRequest → *GenerateContentRequest
+// =========================================================================
+
+// FromCoreRequest converts a CoreRequest into a *GenerateContentRequest.
+//
+// Conversion steps:
+//  1. Call hooks.MutateCoreRequest (plugin modifications to CoreRequest)
+//  2. Map CoreRequest fields to Gemini GenerateContentRequest fields
+//  3. System instruction, messages, safety settings, generation config, tools
+func (a *GeminiProviderAdapter) FromCoreRequest(ctx context.Context, req *format.CoreRequest) (any, error) {
+	if req == nil {
+		return nil, fmt.Errorf("google adapter: core request is nil")
+	}
+
+	// Step 1: Allow plugins to mutate the CoreRequest before conversion.
+	a.hooks.MutateCoreRequest(ctx, req)
+
+	// Step 2: Build the Gemini request.
+	geminiReq := &GenerateContentRequest{
+		Contents: make([]Content, 0, len(req.Messages)),
+	}
+
+	// System instruction (D-01): CoreRequest.System → Gemini system_instruction
+	if len(req.System) > 0 {
+		sysContent := a.blocksToContent(req.System)
+		if len(sysContent.Parts) > 0 {
+			geminiReq.SystemInstruction = &sysContent
+		}
+	}
+
+	// Messages → Contents (role mapping: "assistant" → "model", "user" → "user")
+	for _, msg := range req.Messages {
+		content := a.blocksToContent(msg.Content)
+		content.Role = a.mapRoleToGemini(msg.Role)
+		geminiReq.Contents = append(geminiReq.Contents, content)
+	}
+
+	// SafetySettings (D-02): CoreRequest.SafetySettings map → Gemini []SafetySetting
+	if len(req.SafetySettings) > 0 {
+		geminiReq.SafetySettings = a.toSafetySettings(req.SafetySettings)
+	}
+
+	// GenerationConfig (D-02): CoreRequest.GenerationConfig map + direct fields
+	geminiReq.GenerationConfig = a.toGenerationConfig(req)
+
+	// Tools (D-03): CoreRequest.Tools → Gemini []Tool with FunctionDeclarations
+	if len(req.Tools) > 0 {
+		geminiReq.Tools = make([]Tool, 0, len(req.Tools))
+		for _, t := range req.Tools {
+			geminiReq.Tools = append(geminiReq.Tools, Tool{
+				FunctionDeclarations: []FunctionDeclaration{
+					{
+						Name:        t.Name,
+						Description: t.Description,
+						Parameters:  t.InputSchema,
+					},
+				},
+			})
+		}
+	}
+
+	return geminiReq, nil
+}
+
+// =========================================================================
+// ToCoreResponse — *GenerateContentResponse → *CoreResponse
+// =========================================================================
+
+// ToCoreResponse converts a *GenerateContentResponse into a *CoreResponse.
+//
+// The first candidate's content becomes a single assistant message.
+// Token usage is extracted from UsageMetadata.
+func (a *GeminiProviderAdapter) ToCoreResponse(ctx context.Context, resp any) (*format.CoreResponse, error) {
+	geminiResp, ok := resp.(*GenerateContentResponse)
+	if !ok {
+		return nil, fmt.Errorf("google adapter: expected *GenerateContentResponse, got %T", resp)
+	}
+
+	// Map status from candidates.
+	status := "completed"
+	var stopReason string
+	var coreContent []format.CoreContentBlock
+
+	if len(geminiResp.Candidates) > 0 {
+		candidate := geminiResp.Candidates[0]
+		stopReason = a.mapFinishReason(candidate.FinishReason)
+		coreContent = a.fromParts(candidate.Content.Parts)
+		switch candidate.FinishReason {
+		case "MAX_TOKENS":
+			status = "incomplete"
+		case "SAFETY", "RECITATION", "OTHER":
+			status = "failed"
+		}
+	}
+
+	coreResp := &format.CoreResponse{
+		Status: status,
+		Messages: []format.CoreMessage{
+			{
+				Role:    "assistant",
+				Content: coreContent,
+			},
+		},
+		StopReason: stopReason,
+	}
+
+	if geminiResp.UsageMetadata != nil {
+		coreResp.Usage = format.CoreUsage{
+			InputTokens:  geminiResp.UsageMetadata.PromptTokenCount,
+			OutputTokens: geminiResp.UsageMetadata.CandidatesTokenCount,
+			TotalTokens:  geminiResp.UsageMetadata.TotalTokenCount,
+		}
+	}
+
+	return coreResp, nil
+}
+
+// =========================================================================
+// ToCoreStream — <-chan GenerateContentResponse → <-chan CoreStreamEvent
+// =========================================================================
+
+// ToCoreStream consumes a channel of GenerateContentResponse (from a Gemini
+// streaming endpoint) and returns a channel of CoreStreamEvent.
+//
+// Gemini streaming returns full candidate snapshots per event, not deltas.
+// The adapter computes text deltas by comparing each chunk against the previous
+// snapshot for each candidate index.
+//
+// Emitted event sequence per candidate:
+//   - core.content_block.started (first chunk for a candidate)
+//   - core.text.delta (each subsequent chunk with new text)
+//   - core.content_block.done (chunk with FinishReason set)
+//   - core.completed (final chunk with UsageMetadata)
+func (a *GeminiProviderAdapter) ToCoreStream(ctx context.Context, src any) (<-chan format.CoreStreamEvent, error) {
+	ch, ok := src.(<-chan GenerateContentResponse)
+	if !ok {
+		return nil, fmt.Errorf("google adapter: expected <-chan GenerateContentResponse, got %T", src)
+	}
+
+	events := make(chan format.CoreStreamEvent, 64)
+
+	go func() {
+		defer close(events)
+
+		// Per-candidate state for delta computation.
+		type candidateState struct {
+			started    bool
+			prevText   string
+			blockIndex int // monotonically increasing content block index
+		}
+		candidates := make(map[int]*candidateState)
+		var seqNum int64
+		var finalUsage *format.CoreUsage
+		var lastModel string
+		var seenCompletion bool
+
+		emit := func(ev format.CoreStreamEvent) {
+			seqNum++
+			ev.SeqNum = seqNum
+			select {
+			case events <- ev:
+			case <-ctx.Done():
+			}
+		}
+
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case chunk, ok := <-ch:
+				if !ok {
+					// Channel closed — emit completion if not already done.
+					if !seenCompletion {
+						if finalUsage != nil {
+							emit(format.CoreStreamEvent{
+								Type:   format.CoreEventCompleted,
+								Status: "completed",
+								Model:  lastModel,
+								Usage:  finalUsage,
+							})
+						} else {
+							emit(format.CoreStreamEvent{
+								Type:   format.CoreEventCompleted,
+								Status: "completed",
+								Model:  lastModel,
+							})
+						}
+					}
+					return
+				}
+
+				// Process each candidate in the chunk.
+				for _, candidate := range chunk.Candidates {
+					state := candidates[candidate.Index]
+					if state == nil {
+						state = &candidateState{blockIndex: len(candidates) * 2}
+						candidates[candidate.Index] = state
+					}
+
+					// Extract current full text from this candidate's content.
+					currentText := a.extractText(candidate.Content.Parts)
+
+					// Emit content_block.started on first appearance.
+					if !state.started {
+						state.started = true
+						state.prevText = ""
+
+						ci := candidate.Index
+						emit(format.CoreStreamEvent{
+							Type:        format.CoreContentBlockStarted,
+							Index:       state.blockIndex,
+							ChoiceIndex: &ci,
+							ContentBlock: &format.CoreContentBlock{
+								Type: "text",
+							},
+						})
+					}
+
+					// Compute text delta.
+					delta := a.computeDelta(state.prevText, currentText)
+					if delta != "" {
+						ci := candidate.Index
+						emit(format.CoreStreamEvent{
+							Type:        format.CoreTextDelta,
+							Index:       state.blockIndex,
+							Delta:       delta,
+							ChoiceIndex: &ci,
+						})
+					}
+
+					state.prevText = currentText
+
+					// Emit content_block.done if FinishReason is set.
+					if candidate.FinishReason != "" {
+						stopReason := a.mapFinishReason(candidate.FinishReason)
+						ci := candidate.Index
+						emit(format.CoreStreamEvent{
+							Type:        format.CoreContentBlockDone,
+							Index:       state.blockIndex,
+							StopReason:  stopReason,
+							ChoiceIndex: &ci,
+						})
+					}
+				}
+
+				// Track usage from the last chunk.
+				if chunk.UsageMetadata != nil {
+					finalUsage = &format.CoreUsage{
+						InputTokens:  chunk.UsageMetadata.PromptTokenCount,
+						OutputTokens: chunk.UsageMetadata.CandidatesTokenCount,
+						TotalTokens:  chunk.UsageMetadata.TotalTokenCount,
+					}
+				}
+			}
+		}
+	}()
+
+	return events, nil
+}
+
+// =========================================================================
+// Helpers: Core → Gemini
+// =========================================================================
+
+// blocksToContent converts []CoreContentBlock to Content (Gemini format).
+func (a *GeminiProviderAdapter) blocksToContent(blocks []format.CoreContentBlock) Content {
+	parts := make([]Part, 0, len(blocks))
+	for _, b := range blocks {
+		switch b.Type {
+		case "text":
+			parts = append(parts, Part{Text: b.Text})
+		case "image":
+			parts = append(parts, Part{
+				InlineData: &Blob{
+					MimeType: b.MediaType,
+					Data:     b.ImageData,
+				},
+			})
+		case "tool_use":
+			parts = append(parts, Part{
+				FunctionCall: &FunctionCall{
+					Name: b.ToolName,
+					Args: b.ToolInput,
+				},
+			})
+		case "tool_result":
+			// Combine tool result content into a single text for the response.
+			var respText string
+			if len(b.ToolResultContent) > 0 {
+				for _, tc := range b.ToolResultContent {
+					respText += tc.Text
+				}
+			}
+			respMap := map[string]any{"response": respText}
+			respRaw, _ := marshalRaw(respMap)
+			parts = append(parts, Part{
+				FunctionResponse: &FunctionResponse{
+					Name:     b.ToolUseID,
+					Response: respRaw,
+				},
+			})
+		case "reasoning":
+			// Reasoning blocks are not directly representable in Gemini format.
+			// Skip reasoning content in the upstream request.
+			continue
+		default:
+			// Fallback: treat unknown types as text.
+			if b.Text != "" {
+				parts = append(parts, Part{Text: b.Text})
+			}
+		}
+	}
+	return Content{Parts: parts}
+}
+
+// mapRoleToGemini converts a Core role string to a Gemini role string.
+// Core "assistant" → Gemini "model". Other roles ("user", "system") → Gemini "user".
+func (a *GeminiProviderAdapter) mapRoleToGemini(role string) string {
+	switch role {
+	case "assistant":
+		return "model"
+	case "user", "system":
+		return "user"
+	default:
+		return "user"
+	}
+}
+
+// toSafetySettings converts CoreRequest.SafetySettings map to []SafetySetting.
+func (a *GeminiProviderAdapter) toSafetySettings(ss map[string]any) []SafetySetting {
+	result := make([]SafetySetting, 0, len(ss))
+	for category, threshold := range ss {
+		thresholdStr, ok := threshold.(string)
+		if !ok {
+			continue
+		}
+		result = append(result, SafetySetting{
+			Category:  category,
+			Threshold: thresholdStr,
+		})
+	}
+	return result
+}
+
+// toGenerationConfig builds a GenerationConfig from CoreRequest fields.
+func (a *GeminiProviderAdapter) toGenerationConfig(req *format.CoreRequest) *GenerationConfig {
+	// Start with explicit fields from CoreRequest.
+	gc := &GenerationConfig{
+		Temperature:   req.Temperature,
+		TopP:          req.TopP,
+		StopSequences: req.StopSequences,
+	}
+
+	if req.MaxTokens > 0 {
+		gc.MaxOutputTokens = req.MaxTokens
+	} else if a.cfg.DefaultMaxTokens > 0 {
+		gc.MaxOutputTokens = a.cfg.DefaultMaxTokens
+	}
+
+	// Apply GenerationConfig map overrides (D-02).
+	if len(req.GenerationConfig) > 0 {
+		a.applyGenerationConfigMap(gc, req.GenerationConfig)
+	}
+
+	return gc
+}
+
+// applyGenerationConfigMap applies map entries to a GenerationConfig struct.
+func (a *GeminiProviderAdapter) applyGenerationConfigMap(gc *GenerationConfig, cfg map[string]any) {
+	for k, v := range cfg {
+		switch k {
+		case "temperature":
+			if f, ok := toFloat64(v); ok {
+				gc.Temperature = &f
+			}
+		case "top_p":
+			if f, ok := toFloat64(v); ok {
+				gc.TopP = &f
+			}
+		case "top_k":
+			if f, ok := toFloat64(v); ok {
+				gc.TopK = &f
+			}
+		case "max_output_tokens":
+			if i, ok := toInt(v); ok {
+				gc.MaxOutputTokens = i
+			}
+		case "stop_sequences":
+			if ss, ok := toStringSlice(v); ok {
+				gc.StopSequences = ss
+			}
+		case "response_mime_type":
+			if s, ok := v.(string); ok {
+				gc.ResponseMimeType = s
+			}
+		case "candidate_count":
+			if i, ok := toInt(v); ok {
+				gc.CandidateCount = i
+			}
+		}
+	}
+}
+
+// =========================================================================
+// Helpers: Gemini → Core
+// =========================================================================
+
+// fromParts converts Gemini Parts to []CoreContentBlock.
+func (a *GeminiProviderAdapter) fromParts(parts []Part) []format.CoreContentBlock {
+	result := make([]format.CoreContentBlock, 0, len(parts))
+	for _, p := range parts {
+		result = append(result, a.fromPart(p))
+	}
+	return result
+}
+
+// fromPart converts a single Gemini Part to CoreContentBlock.
+func (a *GeminiProviderAdapter) fromPart(p Part) format.CoreContentBlock {
+	switch {
+	case p.Text != "":
+		return format.CoreContentBlock{
+			Type: "text",
+			Text: p.Text,
+		}
+	case p.FunctionCall != nil:
+		return format.CoreContentBlock{
+			Type:      "tool_use",
+			ToolUseID: p.FunctionCall.Name, // Gemini uses function name as identifier
+			ToolName:  p.FunctionCall.Name,
+			ToolInput: p.FunctionCall.Args,
+		}
+	case p.FunctionResponse != nil:
+		return format.CoreContentBlock{
+			Type:      "tool_result",
+			ToolUseID: p.FunctionResponse.Name,
+		}
+	case p.InlineData != nil:
+		return format.CoreContentBlock{
+			Type:      "image",
+			ImageData: p.InlineData.Data,
+			MediaType: p.InlineData.MimeType,
+		}
+	default:
+		return format.CoreContentBlock{
+			Type: "text",
+		}
+	}
+}
+
+// mapFinishReason maps Gemini finish_reason to Core stop_reason.
+func (a *GeminiProviderAdapter) mapFinishReason(reason string) string {
+	switch reason {
+	case "STOP":
+		return "end_turn"
+	case "MAX_TOKENS":
+		return "max_tokens"
+	case "SAFETY":
+		return "content_filter"
+	case "RECITATION":
+		return "content_filter"
+	case "OTHER":
+		return "error"
+	case "FINISH_REASON_UNSPECIFIED":
+		return ""
+	default:
+		return reason
+	}
+}
+
+// =========================================================================
+// Delta computation helpers
+// =========================================================================
+
+// extractText concatenates all text parts from a Parts list.
+func (a *GeminiProviderAdapter) extractText(parts []Part) string {
+	var text string
+	for _, p := range parts {
+		text += p.Text
+	}
+	return text
+}
+
+// computeDelta returns the text difference between prev and current.
+// Since Gemini returns full snapshots, we just return the new suffix.
+// If prev is empty or current is shorter, returns current.
+func (a *GeminiProviderAdapter) computeDelta(prev, current string) string {
+	if len(current) <= len(prev) {
+		return current
+	}
+	return current[len(prev):]
+}
+
+// =========================================================================
+// Type conversion helpers
+// =========================================================================
+
+// toFloat64 attempts to convert an any value to float64.
+func toFloat64(v any) (float64, bool) {
+	switch val := v.(type) {
+	case float64:
+		return val, true
+	case int:
+		return float64(val), true
+	case int64:
+		return float64(val), true
+	case json.Number:
+		f, err := val.Float64()
+		return f, err == nil
+	default:
+		return 0, false
+	}
+}
+
+// toInt attempts to convert an any value to int.
+func toInt(v any) (int, bool) {
+	switch val := v.(type) {
+	case int:
+		return val, true
+	case float64:
+		return int(val), true
+	case int64:
+		return int(val), true
+	case json.Number:
+		i, err := val.Int64()
+		return int(i), err == nil
+	default:
+		return 0, false
+	}
+}
+
+// toStringSlice attempts to convert an any value to []string.
+func toStringSlice(v any) ([]string, bool) {
+	switch val := v.(type) {
+	case []string:
+		return val, true
+	case []any:
+		result := make([]string, 0, len(val))
+		for _, item := range val {
+			if s, ok := item.(string); ok {
+				result = append(result, s)
+			}
+		}
+		return result, len(result) > 0
+	default:
+		return nil, false
+	}
+}
+
+// marshalRaw marshals an any value to json.RawMessage.
+func marshalRaw(v any) (json.RawMessage, error) {
+	data, err := json.Marshal(v)
+	if err != nil {
+		return nil, err
+	}
+	return json.RawMessage(data), nil
+}

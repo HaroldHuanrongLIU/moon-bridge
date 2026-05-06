@@ -149,7 +149,7 @@ func (client *Client) ProbeWebSearch(ctx context.Context, model string) (bool, e
 			Type:    "web_search_20250305",
 			MaxUses: 1,
 		}},
-		ToolChoice: ToolChoice{Type: "auto"},
+		ToolChoice: &ToolChoice{Type: "auto"},
 	})
 	if err != nil {
 		if IsUnsupportedWebSearchError(err) {

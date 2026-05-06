@@ -120,20 +120,24 @@ func (a *AnthropicProviderAdapter) FromCoreRequest(ctx context.Context, req *for
 	if len(req.Tools) > 0 {
 		anthropicReq.Tools = make([]Tool, 0, len(req.Tools))
 		for _, t := range req.Tools {
-		anthropicReq.Tools = append(anthropicReq.Tools, Tool{
-			Name:        t.Name,
-			Type:        "custom",
-			Description: t.Description,
-			InputSchema: cleanSchema(t.InputSchema),
-		})
+			schema := cleanSchema(t.InputSchema)
+			if schema == nil {
+				schema = map[string]any{"type": "object"}
+			}
+			anthropicReq.Tools = append(anthropicReq.Tools, Tool{
+				Name:        t.Name,
+				Description: t.Description,
+				InputSchema: schema,
+			})
 		}
 	}
 
 	// ToolChoice
 	if req.ToolChoice != nil {
-		anthropicReq.ToolChoice = a.toAnthropicToolChoice(*req.ToolChoice)
+		tc := a.toAnthropicToolChoice(*req.ToolChoice)
+	anthropicReq.ToolChoice = &tc
 	} else {
-		anthropicReq.ToolChoice = ToolChoice{Type: "auto"}
+		anthropicReq.ToolChoice = &ToolChoice{Type: "auto"}
 	}
 
 	// Step 3: Cache planning via CacheManager.
@@ -722,7 +726,9 @@ func (a *AnthropicProviderAdapter) RememberStreamContent(ctx context.Context, bl
 }
 // cleanSchema recursively removes nil values from a JSON schema map.
 // DeepSeek rejects null values in schema properties.
-// Returns a default schema {"type":"object"} when no keys remain.
+// Empty maps are preserved as-is (e.g. properties:{}) to avoid corrupting
+// the JSON Schema structure. Returns nil when the entire result is empty;
+// callers must supply a {"type":"object"} fallback when needed.
 func cleanSchema(schema map[string]any) map[string]any {
 	if schema == nil {
 		return nil
@@ -733,8 +739,12 @@ func cleanSchema(schema map[string]any) map[string]any {
 		case nil:
 			continue // skip nil values
 		case map[string]any:
-			cleaned := cleanSchema(val)
-			if len(cleaned) > 0 {
+			if len(val) == 0 {
+				// Preserve empty maps (e.g. properties: {}) instead of
+				// recursing, which would turn {} into {"type":"object"}.
+				result[k] = val
+			} else {
+				cleaned := cleanSchema(val)
 				result[k] = cleaned
 			}
 		case []any:
@@ -756,7 +766,7 @@ func cleanSchema(schema map[string]any) map[string]any {
 		}
 	}
 	if len(result) == 0 {
-		return map[string]any{"type": "object"}
+		return nil
 	}
 	return result
 }

@@ -83,7 +83,7 @@ func TestOrchestratorExecutesVisualBriefAndContinues(t *testing.T) {
 	orchestrator := NewOrchestrator(OrchestratorConfig{Upstream: upstream, Client: vision})
 
 	resp, err := orchestrator.CreateMessage(context.Background(), anthropic.MessageRequest{
-		ToolChoice: anthropic.ToolChoice{Type: "tool", Name: ToolVisualBrief},
+		ToolChoice: &anthropic.ToolChoice{Type: "tool", Name: ToolVisualBrief},
 	})
 	if err != nil {
 		t.Fatalf("CreateMessage() error = %v", err)

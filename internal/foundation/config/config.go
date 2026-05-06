@@ -19,6 +19,9 @@ const (
 const (
 	ProtocolAnthropic      = "anthropic"
 	ProtocolOpenAIResponse = "openai-response"
+	// Phase 5: New protocol constants (D-08)
+	ProtocolGoogleGenAI    = "google-genai"
+	ProtocolOpenAIChat     = "openai-chat"
 )
 
 type Mode string
@@ -116,7 +119,15 @@ type ProviderDef struct {
 	APIKey           string
 	Version          string
 	UserAgent        string
-	Protocol         string // "anthropic" (default) or "openai-response"
+	Protocol         string // "anthropic" (default), "openai-response", "google-genai", or "openai-chat"
+	// Phase 5: Google GenAI flat fields (D-09).
+	// Only relevant when Protocol == ProtocolGoogleGenAI.
+	// project: Google Cloud project ID (Vertex AI).
+	// location: Google Cloud location (e.g., "us-central1").
+	// api_version: Gemini API version (default "v1").
+	Project    string `yaml:"project,omitempty"`
+	Location   string `yaml:"location,omitempty"`
+	APIVersion string `yaml:"api_version,omitempty"`
 	WebSearchSupport WebSearchSupport
 	WebSearchMaxUses int
 	TavilyAPIKey     string
@@ -276,9 +287,9 @@ func (cfg Config) validateTransform() error {
 			return fmt.Errorf("providers.%s.api_key is required", key)
 		}
 		switch def.Protocol {
-		case "", ProtocolAnthropic, ProtocolOpenAIResponse:
+		case "", ProtocolAnthropic, ProtocolOpenAIResponse, ProtocolGoogleGenAI, ProtocolOpenAIChat:
 		default:
-			return fmt.Errorf("providers.%s.protocol must be \"anthropic\" or \"openai-response\"", key)
+			return fmt.Errorf("providers.%s.protocol must be \"anthropic\", \"openai-response\", \"google-genai\", or \"openai-chat\"", key)
 		}
 		for modelName := range def.Models {
 			if modelName == "" {
