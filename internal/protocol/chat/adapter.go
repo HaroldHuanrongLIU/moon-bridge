@@ -237,6 +237,10 @@ func (a *ChatProviderAdapter) ToCoreStream(ctx context.Context, src any) (<-chan
 		type choiceState struct {
 			started    bool
 			blockIndex int // monotonically increasing content block index
+			hasReasoning bool   // whether a reasoning block is active
+				reasonIndex  int   // block index for the reasoning content block
+			toolCallIdx  int   // next tool call content block index (starts after text block)
+			callStarted map[int]bool // tracks which tool call indices have been started
 		}
 		choices := make(map[int]*choiceState)
 		var seqNum int64
@@ -297,6 +301,63 @@ func (a *ChatProviderAdapter) ToCoreStream(ctx context.Context, src any) (<-chan
 					// Emit content_block.started on first appearance with role.
 					if !state.started && sc.Delta.Role == "assistant" {
 						state.started = true
+						blockType := "text"
+						if sc.Delta.ReasoningContent != "" {
+							blockType = "reasoning"
+							state.hasReasoning = true
+							state.reasonIndex = state.blockIndex
+						}
+						emit(format.CoreStreamEvent{
+							Type:        format.CoreContentBlockStarted,
+							Index:       state.blockIndex,
+							ChoiceIndex: &ci,
+							ContentBlock: &format.CoreContentBlock{
+								Type: blockType,
+							},
+						})
+					}
+
+					// Emit text delta.
+					// Emit reasoning content as text delta.
+					// Note: reasoning_content may appear AFTER the text block has started
+					// (DeepSeek first sends role=assistant, then reasoning_content in subsequent chunks).
+					if sc.Delta.ReasoningContent != "" {
+						if !state.hasReasoning {
+							// Transition from premature text block to reasoning block.
+							state.hasReasoning = true
+							state.reasonIndex = state.blockIndex + 1
+							state.blockIndex = state.reasonIndex
+							emit(format.CoreStreamEvent{
+								Type:  format.CoreContentBlockDone,
+								Index: state.blockIndex,
+								ChoiceIndex: &ci,
+							})
+							emit(format.CoreStreamEvent{
+								Type:        format.CoreContentBlockStarted,
+								Index:       state.reasonIndex,
+								ChoiceIndex: &ci,
+								ContentBlock: &format.CoreContentBlock{
+									Type: "reasoning",
+								},
+							})
+						}
+						emit(format.CoreStreamEvent{
+							Type:        format.CoreTextDelta,
+							Index:       state.reasonIndex,
+							Delta:       sc.Delta.ReasoningContent,
+							ChoiceIndex: &ci,
+						})
+					}
+
+					// Transition from reasoning block to text block.
+					if sc.Delta.Content != "" && state.hasReasoning {
+						emit(format.CoreStreamEvent{
+							Type:  format.CoreContentBlockDone,
+							Index: state.reasonIndex,
+							ChoiceIndex: &ci,
+						})
+						state.hasReasoning = false
+						state.blockIndex = state.reasonIndex + 1
 						emit(format.CoreStreamEvent{
 							Type:        format.CoreContentBlockStarted,
 							Index:       state.blockIndex,
@@ -306,8 +367,6 @@ func (a *ChatProviderAdapter) ToCoreStream(ctx context.Context, src any) (<-chan
 							},
 						})
 					}
-
-					// Emit text delta.
 					if sc.Delta.Content != "" {
 						emit(format.CoreStreamEvent{
 							Type:        format.CoreTextDelta,
@@ -317,11 +376,33 @@ func (a *ChatProviderAdapter) ToCoreStream(ctx context.Context, src any) (<-chan
 						})
 					}
 
-					// Emit tool call args delta.
+					// Emit tool call content blocks and args deltas.
 					for _, tc := range sc.Delta.ToolCalls {
+						// Emit content_block.started for first occurrence of each tool call.
+						if tc.ID != "" {
+							if state.callStarted == nil {
+								state.callStarted = make(map[int]bool)
+								// Start tool call indices after the current text/reasoning block.
+								state.toolCallIdx = state.blockIndex + 1
+							}
+							if !state.callStarted[state.toolCallIdx] {
+								state.callStarted[state.toolCallIdx] = true
+								emit(format.CoreStreamEvent{
+									Type:        format.CoreContentBlockStarted,
+									Index:       state.toolCallIdx,
+									ChoiceIndex: &ci,
+									ContentBlock: &format.CoreContentBlock{
+										Type:      "tool_use",
+										ToolUseID: tc.ID,
+										ToolName:  tc.Function.Name,
+									},
+								})
+								state.toolCallIdx++
+							}
+						}
 						emit(format.CoreStreamEvent{
 							Type:        format.CoreToolCallArgsDelta,
-							Index:       state.blockIndex,
+							Index:       state.toolCallIdx - 1,
 							Delta:       string(tc.Function.Arguments),
 							ChoiceIndex: &ci,
 						})
@@ -336,6 +417,19 @@ func (a *ChatProviderAdapter) ToCoreStream(ctx context.Context, src any) (<-chan
 							StopReason:  stopReason,
 							ChoiceIndex: &ci,
 						})
+						// Complete tool call blocks.
+						for idx := range state.callStarted {
+							emit(format.CoreStreamEvent{
+								Type:  format.CoreToolCallArgsDone,
+								Index: idx,
+								ChoiceIndex: &ci,
+							})
+							emit(format.CoreStreamEvent{
+								Type:  format.CoreContentBlockDone,
+								Index: idx,
+								ChoiceIndex: &ci,
+							})
+						}
 					}
 				}
 
