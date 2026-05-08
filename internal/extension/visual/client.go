@@ -4,7 +4,6 @@ import (
 	"context"
 	"fmt"
 	"strings"
-	"time"
 
 	"moonbridge/internal/protocol/anthropic"
 )
@@ -12,11 +11,9 @@ import (
 const visualSystemPrompt = "You are Kimi running behind Moon Bridge Visual. Analyze images carefully, state uncertainty, and do not invent visual facts."
 
 type ClientConfig struct {
-	Provider        Provider
-	Model           string
-	MetricsModel    string
-	MaxTokens       int
-	MetricsRecorder MetricsRecorder
+	Provider  Provider
+	Model     string
+	MaxTokens int
 }
 
 type ImageInput struct {
@@ -37,29 +34,14 @@ type AnalysisRequest struct {
 	Images []ImageInput
 }
 
-// ToolCallMetrics captures telemetry for one Visual provider call.
-type ToolCallMetrics struct {
-	Tool         string
-	Model        string
-	ActualModel  string
-	Usage        anthropic.Usage
-	Duration     time.Duration
-	Status       string
-	ErrorMessage string
-}
-
-type MetricsRecorder func(ToolCallMetrics)
-
 type VisionClient interface {
 	Analyze(context.Context, AnalysisRequest) (string, error)
 }
 
 type BridgeClient struct {
-	provider        Provider
-	model           string
-	metricsModel    string
-	maxTokens       int
-	metricsRecorder MetricsRecorder
+	provider  Provider
+	model     string
+	maxTokens int
 }
 
 func NewBridgeClient(cfg ClientConfig) *BridgeClient {
@@ -67,17 +49,10 @@ func NewBridgeClient(cfg ClientConfig) *BridgeClient {
 	if maxTokens <= 0 {
 		maxTokens = 2048
 	}
-	model := strings.TrimSpace(cfg.Model)
-	metricsModel := strings.TrimSpace(cfg.MetricsModel)
-	if metricsModel == "" {
-		metricsModel = model
-	}
 	return &BridgeClient{
-		provider:        cfg.Provider,
-		model:           model,
-		metricsModel:    metricsModel,
-		maxTokens:       maxTokens,
-		metricsRecorder: cfg.MetricsRecorder,
+		provider:  cfg.Provider,
+		model:     strings.TrimSpace(cfg.Model),
+		maxTokens: maxTokens,
 	}
 }
 
@@ -86,17 +61,12 @@ func (client *BridgeClient) Analyze(ctx context.Context, request AnalysisRequest
 		return "", fmt.Errorf("visual bridge client is nil")
 	}
 	if client.provider == nil {
-		err := fmt.Errorf("visual provider is nil")
-		client.recordMetrics(request, anthropic.MessageResponse{}, 0, "error", err.Error())
-		return "", err
+		return "", fmt.Errorf("visual provider is nil")
 	}
 	if client.model == "" {
-		err := fmt.Errorf("visual model is required")
-		client.recordMetrics(request, anthropic.MessageResponse{}, 0, "error", err.Error())
-		return "", err
+		return "", fmt.Errorf("visual model is required")
 	}
 
-	start := time.Now()
 	resp, err := client.provider.CreateMessage(ctx, anthropic.MessageRequest{
 		Model:     client.model,
 		MaxTokens: client.maxTokens,
@@ -109,38 +79,14 @@ func (client *BridgeClient) Analyze(ctx context.Context, request AnalysisRequest
 			Content: anthropicContentParts(request),
 		}},
 	})
-	duration := time.Since(start)
 	if err != nil {
-		client.recordMetrics(request, resp, duration, "error", err.Error())
 		return "", err
 	}
 	text := textFromContent(resp.Content)
 	if text == "" {
-		err := fmt.Errorf("visual provider returned empty content")
-		client.recordMetrics(request, resp, duration, "error", err.Error())
-		return "", err
+		return "", fmt.Errorf("visual provider returned empty content")
 	}
-	client.recordMetrics(request, resp, duration, "success", "")
 	return text, nil
-}
-
-func (client *BridgeClient) recordMetrics(request AnalysisRequest, resp anthropic.MessageResponse, duration time.Duration, status string, errMsg string) {
-	if client == nil || client.metricsRecorder == nil {
-		return
-	}
-	actualModel := client.model
-	if strings.TrimSpace(resp.Model) != "" {
-		actualModel = strings.TrimSpace(resp.Model)
-	}
-	client.metricsRecorder(ToolCallMetrics{
-		Tool:         request.Tool,
-		Model:        client.metricsModel,
-		ActualModel:  actualModel,
-		Usage:        resp.Usage,
-		Duration:     duration,
-		Status:       status,
-		ErrorMessage: errMsg,
-	})
 }
 
 func anthropicContentParts(request AnalysisRequest) []anthropic.ContentBlock {
