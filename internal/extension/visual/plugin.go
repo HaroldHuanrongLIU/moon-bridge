@@ -78,6 +78,7 @@ func ConfigSpecs() []config.ExtensionConfigSpec {
 			return ValidateConfig(
 				config.PluginFromGlobalConfig(&cfg),
 				config.ProviderFromGlobalConfig(&cfg),
+				cfg,
 			)
 		},
 	}}
@@ -121,15 +122,33 @@ func (cfg Config) Normalized() Config {
 	return cfg
 }
 
-func ValidateConfig(pluginCfg config.PluginConfig, providerCfg config.ProviderConfig) error {
+
+// decodeVisualConfig decodes the visual extension config for a model alias.
+func decodeVisualConfig(fullCfg config.Config, modelAlias string) (Config, error) {
+	raw := fullCfg.ExtensionRawConfig("visual", modelAlias)
+	if len(raw) == 0 {
+		return Config{}, fmt.Errorf("visual config not found for %s", modelAlias)
+	}
+	var cfg Config
+	data, err := json.Marshal(raw)
+	if err != nil {
+		return Config{}, fmt.Errorf("marshal visual config: %w", err)
+	}
+	if err := json.Unmarshal(data, &cfg); err != nil {
+		return Config{}, fmt.Errorf("unmarshal visual config: %w", err)
+	}
+	return cfg.Normalized(), nil
+}
+
+func ValidateConfig(pluginCfg config.PluginConfig, providerCfg config.ProviderConfig, fullCfg config.Config) error {
 	for alias := range providerCfg.Routes {
-		if err := validateModelConfig(pluginCfg, providerCfg, alias); err != nil {
+		if err := validateModelConfig(pluginCfg, providerCfg, alias, fullCfg); err != nil {
 			return err
 		}
 	}
 	for providerKey, def := range providerCfg.Providers {
 		for modelName := range def.Models {
-			if err := validateModelConfig(pluginCfg, providerCfg, providerKey+"/"+modelName); err != nil {
+			if err := validateModelConfig(pluginCfg, providerCfg, providerKey+"/"+modelName, fullCfg); err != nil {
 				return err
 			}
 		}
@@ -137,22 +156,25 @@ func ValidateConfig(pluginCfg config.PluginConfig, providerCfg config.ProviderCo
 	return nil
 }
 
-func validateModelConfig(pluginCfg config.PluginConfig, providerCfg config.ProviderConfig, modelAlias string) error {
-	cfg, ok := ConfigForModel(pluginCfg, modelAlias)
-	if !ok {
+func validateModelConfig(pluginCfg config.PluginConfig, providerCfg config.ProviderConfig, modelAlias string, fullCfg config.Config) error {
+	if !fullCfg.ExtensionEnabled("visual", modelAlias) {
 		return nil
 	}
-	if cfg.Provider == "" {
+	// Decode visual config using the full config (model-level + global merge).
+	visCfg, err := decodeVisualConfig(fullCfg, modelAlias)
+	if err != nil {
+		return err
+	}
+	if visCfg.Provider == "" {
 		return fmt.Errorf("extensions.%s.config.provider is required when visual is enabled for %s", PluginName, modelAlias)
 	}
-	if cfg.Model == "" {
+	if visCfg.Model == "" {
 		return fmt.Errorf("extensions.%s.config.model is required when visual is enabled for %s", PluginName, modelAlias)
 	}
-	def, ok := providerCfg.Providers[cfg.Provider]
+	def, ok := providerCfg.Providers[visCfg.Provider]
 	if !ok {
-		return fmt.Errorf("extensions.%s.config.provider references unknown provider %q", PluginName, cfg.Provider)
+		return fmt.Errorf("extensions.%s.config.provider references unknown provider %q", PluginName, visCfg.Provider)
 	}
-	// Protocol constraint removed — visual extension operates on Core format.
 	_ = def
 	return nil
 }

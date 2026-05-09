@@ -1054,7 +1054,7 @@ func TestAuthWithNoTokenConfiguredPassesAllRequests(t *testing.T) {
 func TestAuthRejectsRequestsWithoutValidToken(t *testing.T) {
 	handler := server.New(server.Config{
 		Provider:  &fakeProvider{},
-		AppConfig: config.ServerConfig{AuthToken: "my-secret"},
+		ServerCfg: config.ServerConfig{AuthToken: "my-secret"},
 	})
 
 	for name, req := range map[string]*http.Request{
@@ -1081,7 +1081,7 @@ func TestAuthRejectsRequestsWithoutValidToken(t *testing.T) {
 func TestAuthAcceptsValidBearerToken(t *testing.T) {
 	t.Skip("needs adapter to new dispatch architecture: requires ProviderMgr config")
 	handler := server.New(server.Config{
-		AppConfig: config.ServerConfig{
+		ServerCfg: config.ServerConfig{
 			AuthToken: "my-secret",
 		},
 		Provider: &fakeProvider{},
