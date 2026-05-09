@@ -20,6 +20,7 @@ import (
 	"moonbridge/internal/service/provider"
 	"moonbridge/internal/service/stats"
 	mbtrace "moonbridge/internal/service/trace"
+	visualpkg "moonbridge/internal/extension/visual"
 )
 
 // ============================================================================
@@ -234,7 +235,22 @@ func (s *Server) handleWithAdapters(
 			return
 		}
 
-		upstreamResp, err := effectiveProvider.CreateMessage(ctx, *upstreamReq)
+		// Wrap with visual orchestrator if enabled for this model.
+		// This strips base64 image data before sending to text-only models.
+		var upstreamRespMsg anthropic.MessageResponse
+		if visProv := s.wrapAnthropicWithVisual(ctx, openAIReq.Model, effectiveProvider); visProv != nil {
+			upstreamRespMsg, err = visProv.CreateMessage(ctx, *upstreamReq)
+		} else {
+			var rawResp any
+			rawResp, err = effectiveProvider.CreateMessage(ctx, *upstreamReq)
+			if err == nil {
+				var okt bool
+				upstreamRespMsg, okt = rawResp.(anthropic.MessageResponse)
+				if !okt {
+					err = fmt.Errorf("unexpected anthropic response type %T", rawResp)
+				}
+			}
+		}
 		if err != nil {
 			log.Error("adapter path: CreateMessage failed", "error", err)
 			payload := openai.ErrorResponse{
@@ -251,23 +267,7 @@ func (s *Server) handleWithAdapters(
 		}
 
 		// Anthropic response → CoreResponse.
-		// upstreamResp is any, but ToCoreResponse expects *anthropic.MessageResponse.
-		// Extract the concrete type before passing by pointer.
-		msgResp, ok := upstreamResp.(anthropic.MessageResponse)
-		if !ok {
-			log.Error("adapter path: unexpected anthropic response type", "type", fmt.Sprintf("%T", upstreamResp))
-			payload := openai.ErrorResponse{
-				Error: openai.ErrorObject{
-					Message: fmt.Sprintf("unexpected anthropic response type %T", upstreamResp),
-					Type:    "server_error",
-					Code:    "conversion_error",
-				},
-			}
-			record.Error = traceError("to_core_response", fmt.Errorf("unexpected anthropic response type %T", upstreamResp))
-			record.OpenAIResponse = payload
-			writeOpenAIError(w, http.StatusInternalServerError, payload)
-			return
-		}
+		msgResp := upstreamRespMsg
 		coreResp, err = providerAdapter.ToCoreResponse(ctx, &msgResp)
 		if err != nil {
 			log.Error("adapter path: Anthropic ToCoreResponse failed", "error", err)
@@ -1203,6 +1203,42 @@ func (s *Server) handleAdapterStream(
 	}
 }
 
+
+// wrapAnthropicWithVisual wraps an anthropic provider with the visual orchestrator
+// if the visual extension is enabled and configured for this model alias.
+// Returns nil when visual is not applicable.
+func (s *Server) wrapAnthropicWithVisual(ctx context.Context, modelAlias string, effectiveProvider provider.ProviderClient) visualpkg.Provider {
+	if s.pluginRegistry == nil || s.runtime == nil || modelAlias == "" || s.providerMgr == nil {
+		return nil
+	}
+
+	cfg := s.runtime.Current().Config
+	pluginCfg := config.PluginFromGlobalConfig(&cfg)
+	visCfg, ok := visualpkg.ConfigForModel(pluginCfg, modelAlias)
+	if !ok || visCfg.Provider == "" || visCfg.Model == "" {
+		return nil
+	}
+
+
+	// Get the upstream anthropic client.
+	upstreamAcc, ok := effectiveProvider.(provider.AnthropicClientAccessor)
+	if !ok {
+		return nil
+	}
+
+	// Get the visual provider anthropic client.
+	visClient, err := s.providerMgr.ClientForKey(visCfg.Provider)
+	if err != nil || visClient == nil {
+		slog.Default().Warn("visual: provider not found", "visual_provider", visCfg.Provider, "model", modelAlias)
+		return nil
+	}
+	visAcc, ok := visClient.(provider.AnthropicClientAccessor)
+	if !ok {
+		return nil
+	}
+
+	return visualpkg.WrapProvider(upstreamAcc.AnthropicClient(), visAcc.AnthropicClient(), visCfg.Model, visCfg.MaxRounds, visCfg.MaxTokens)
+}
 
 // injectAnthropicWebSearch adds the Anthropic web_search_20250305 server tool
 // to an anthropic.MessageRequest if not already present.
