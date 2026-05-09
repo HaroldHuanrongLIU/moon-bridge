@@ -1266,13 +1266,12 @@ func prependCachedThinking(upstreamReq *anthropic.MessageRequest, sess *session.
 				break
 			}
 		}
-		// Fallback: try text-based caching (for text-only assistant messages).
-			if !hasThinkingBlock(msg.Content) {
-				prepended := state.PrependCachedForAssistantText(anthropicContentSliceToFormat(msg.Content))
-				if len(prepended) > len(msg.Content) {
-					msg.Content = formatContentSliceToAnthropic(prepended)
-				}
-			}
+		// Fallback: prepend empty thinking block as response boundary.
+		// Prevents model from continuing previous response text.
+		if !hasThinkingBlock(msg.Content) {
+			prepended, _ := deepseekv4.PrependRequiredThinkingForAssistantText(anthropicContentSliceToFormat(msg.Content))
+			msg.Content = formatContentSliceToAnthropic(prepended)
+		}
 	}
 }
 

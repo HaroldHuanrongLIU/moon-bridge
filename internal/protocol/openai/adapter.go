@@ -917,7 +917,7 @@ type inputItem struct {
 	CallID    string          `json:"call_id"`
 	Name      string          `json:"name"`
 	Arguments string          `json:"arguments"`
-	Output    string          `json:"output"`
+	Output    json.RawMessage `json:"output"`
 	ID        string          `json:"id"`
 	Status    string          `json:"status"`
 }
@@ -1000,7 +1000,7 @@ func convertInput(raw json.RawMessage) ([]format.CoreMessage, []format.CoreConte
 					Type:      "tool_result",
 					ToolUseID: item.CallID,
 					ToolResultContent: []format.CoreContentBlock{
-						{Type: "text", Text: item.Output},
+						{Type: "text", Text: outputToString(item.Output)},
 					},
 				}},
 			})
@@ -1427,4 +1427,19 @@ func toolInputString(input json.RawMessage) string {
 		return "{}"
 	}
 	return string(input)
+}
+
+// outputToString converts a json.RawMessage Output field to a string.
+// The output can be a plain string or an array of content parts (multi-modal).
+func outputToString(raw json.RawMessage) string {
+	if len(raw) == 0 || string(raw) == "null" {
+		return ""
+	}
+	// Try string first.
+	var s string
+	if err := json.Unmarshal(raw, &s); err == nil {
+		return s
+	}
+	// Fallback: return the raw JSON as a string (array/object).
+	return string(raw)
 }
