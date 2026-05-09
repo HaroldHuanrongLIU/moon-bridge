@@ -670,6 +670,18 @@ func (a *OpenAIAdapter) streamLoop(ctx context.Context, coreReq *format.CoreRequ
 		// Lifecycle: completed
 		// ==================================================================
 		case format.CoreEventCompleted:
+			// Build output_text from message items, same as FromCoreResponse.
+			var texts []string
+			for _, item := range response.Output {
+				if item.Type == "message" {
+					for _, part := range item.Content {
+						if part.Type == "output_text" || part.Type == "text" {
+							texts = append(texts, part.Text)
+						}
+					}
+				}
+			}
+			response.OutputText = strings.Join(texts, "")
 			response.Status = "completed"
 			if event.Usage != nil {
 				response.Usage = Usage{
@@ -780,6 +792,11 @@ func (a *OpenAIAdapter) streamLoop(ctx context.Context, coreReq *format.CoreRequ
 					})
 				}
 				outputIndex := outputIndexes[index]
+
+				// Store accumulated text in response output for final completed event.
+				if outputIndex < len(response.Output) && len(response.Output[outputIndex].Content) > 0 {
+					response.Output[outputIndex].Content[0].Text = text
+				}
 
 				// output_text.done
 				send(StreamEvent{
