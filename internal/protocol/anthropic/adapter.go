@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"strings"
 	"sync"
 
 	"moonbridge/internal/format"
@@ -169,6 +170,43 @@ func (a *AnthropicProviderAdapter) toCoreCacheControl(cc *CacheControl) *format.
 		TTLSeconds: parseTTLSeconds(cc.TTL),
 		Strategy:   "auto",
 	}
+}
+
+// extractContentText extracts text content from an Anthropic web_search_tool_result
+// Content field, which can be a plain string or a list of content blocks.
+func extractContentText(content any) string {
+	if content == nil {
+		return ""
+	}
+	switch v := content.(type) {
+	case string:
+		return v
+	case []any:
+		var b strings.Builder
+		for _, item := range v {
+			if m, ok := item.(map[string]any); ok {
+				if t, ok := m["text"].(string); ok {
+					if b.Len() > 0 {
+						b.WriteByte('\n')
+					}
+					b.WriteString(t)
+				}
+			}
+		}
+		return b.String()
+	case []ContentBlock:
+		var b strings.Builder
+		for _, block := range v {
+			if block.Type == "text" && block.Text != "" {
+				if b.Len() > 0 {
+					b.WriteByte('\n')
+				}
+				b.WriteString(block.Text)
+			}
+		}
+		return b.String()
+	}
+	return fmt.Sprintf("%v", content)
 }
 
 // parseTTLSeconds parses a duration string like "300s" or "5m" into seconds.
@@ -367,6 +405,7 @@ type streamConverterState struct {
 	blockSignatures map[int]string // content index → reasoning signature (from signature_delta)
 	finalUsage      *format.CoreUsage // tracked from message_delta, passed to message_stop
 	adapter         *AnthropicProviderAdapter // for buffering raw stream events (trace)
+	suppressText    map[int]bool   // text indices to suppress (server-side search status, etc.)
 }
 
 // ToCoreStream consumes an anthropic.Stream and returns a channel of CoreStreamEvent.
@@ -393,6 +432,7 @@ func (a *AnthropicProviderAdapter) ToCoreStream(ctx context.Context, src any) (<
 			blockTypes:      make(map[int]string),
 			blockSignatures: make(map[int]string),
 			adapter:         a,
+			suppressText:    make(map[int]bool),
 		}
 
 		for {
@@ -508,6 +548,18 @@ func (s *streamConverterState) convertEvent(events chan<- format.CoreStreamEvent
 					ReasoningSignature: ev.ContentBlock.Signature,
 				},
 			})
+
+		case "server_tool_use":
+			// Anthropic server-side tool usage marker. Do NOT forward — the tool_use
+			// would become an orphan in subsequent requests (no matching tool_result),
+			// causing API rejection. Server-side tools are transparent to the client.
+			s.blockTypes[index] = "server_tool_use"
+
+		case "web_search_tool_result":
+			// Anthropic server-side tool result. Results are consumed internally by
+			// the model — do NOT forward raw search data as Core text blocks.
+			// Emit a tool_result so the stream state machine stays consistent.
+			s.blockTypes[index] = "web_search_tool_result"
 		}
 
 	case "content_block_delta":
@@ -516,6 +568,12 @@ func (s *streamConverterState) convertEvent(events chan<- format.CoreStreamEvent
 
 		switch {
 		case ev.Delta.Type == "text_delta" || blockType == "text":
+			// Suppress server-side search status messages (e.g. "Search results for query: ...").
+			// These are infrastructure noise from the Anthropic provider, not model output.
+			if strings.HasPrefix(ev.Delta.Text, "Search results for query:") {
+				s.suppressText[index] = true
+				break
+			}
 			s.emit(events, format.CoreStreamEvent{
 				Type:  format.CoreTextDelta,
 				Index: index,
@@ -548,6 +606,12 @@ func (s *streamConverterState) convertEvent(events chan<- format.CoreStreamEvent
 	case "content_block_stop":
 		index := ev.Index
 		blockType := s.blockTypes[index]
+
+		// Skip suppressed blocks (server-side search status text, etc.)
+		if s.suppressText[index] {
+			delete(s.suppressText, index)
+			break
+		}
 
 		if blockType == "thinking" {
 			s.emit(events, format.CoreStreamEvent{
