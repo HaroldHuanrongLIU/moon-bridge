@@ -423,7 +423,12 @@ func (a *OpenAIAdapter) streamLoop(ctx context.Context, coreReq *format.CoreRequ
 			}
 			index := event.Index
 
-			switch event.ContentBlock.Type {
+			blockType := event.ContentBlock.Type
+			if blockType == "reasoning" && !hasReasoningRequested(coreReq) {
+				blockType = "text"
+			}
+
+			switch blockType {
 			case "text":
 				id := fmt.Sprintf("msg_item_%d", index)
 				itemIDs[index] = id
@@ -904,6 +909,26 @@ func (a *OpenAIAdapter) streamLoop(ctx context.Context, coreReq *format.CoreRequ
 	a.hooks.OnStreamComplete(ctx, coreReq.Model, outputText)
 }
 
+// hasReasoningRequested checks whether the original request asked for reasoning.
+// DeepSeek V4 always returns thinking blocks regardless, but reasoning_summary
+// events should only be emitted when the client explicitly requested reasoning.
+// When reasoning wasn't requested, thinking blocks are treated as regular text
+// to avoid "ReasoningSummaryDelta without active item" errors in Codex.
+func hasReasoningRequested(coreReq *format.CoreRequest) bool {
+	if coreReq.Output != nil && coreReq.Output.Effort != "" && coreReq.Output.Effort != "none" {
+		return true
+	}
+	if coreReq.Thinking != nil && coreReq.Thinking.Type == "enabled" {
+		return true
+	}
+	if openaiExt, ok := coreReq.Extensions["openai"].(map[string]any); ok {
+		if _, ok := openaiExt["reasoning"]; ok {
+			return true
+		}
+	}
+	return false
+}
+
 // ============================================================================
 // Input Conversion Helpers
 // ============================================================================
@@ -973,6 +998,15 @@ func convertInput(raw json.RawMessage) ([]format.CoreMessage, []format.CoreConte
 
 	for _, item := range items {
 		if item.Type == "function_call_output" {
+			// Merge pending reasoning into pendingFCBlocks so they become
+			// a single assistant message. This keeps tool_use and tool_result
+			// adjacent, satisfying the Anthropic protocol requirement that
+			// every tool_use must be immediately followed by a tool_result
+			// in the next message.
+			if len(pendingReasoning) > 0 {
+				pendingFCBlocks = append(pendingFCBlocks, pendingReasoning...)
+				pendingReasoning = pendingReasoning[:0]
+			}
 			// Flush pending function_calls before tool results.
 			if len(pendingFCBlocks) > 0 {
 				flushed := make([]format.CoreContentBlock, len(pendingFCBlocks))
@@ -982,16 +1016,6 @@ func convertInput(raw json.RawMessage) ([]format.CoreMessage, []format.CoreConte
 					Content: flushed,
 				})
 				pendingFCBlocks = pendingFCBlocks[:0]
-			}
-			// Flush pending reasoning before tool results.
-			if len(pendingReasoning) > 0 {
-				flushedReasoning := make([]format.CoreContentBlock, len(pendingReasoning))
-				copy(flushedReasoning, pendingReasoning)
-				messages = append(messages, format.CoreMessage{
-					Role:    "assistant",
-					Content: flushedReasoning,
-				})
-				pendingReasoning = pendingReasoning[:0]
 			}
 			// Each tool result → separate tool-role Core message.
 			messages = append(messages, format.CoreMessage{
@@ -1072,7 +1096,12 @@ func convertInput(raw json.RawMessage) ([]format.CoreMessage, []format.CoreConte
 				blocks = append(pendingReasoning, blocks...)
 				pendingReasoning = pendingReasoning[:0]
 			}
-			if len(blocks) > 0 {
+			if len(pendingFCBlocks) > 0 {
+				// Merge into pendingFCBlocks to keep tool_use + text in one
+				// assistant message. This preserves tool_use/tool_result adjacency
+				// required by the Anthropic protocol.
+				pendingFCBlocks = append(pendingFCBlocks, blocks...)
+			} else if len(blocks) > 0 {
 				messages = append(messages, format.CoreMessage{
 					Role:    "assistant",
 					Content: blocks,
