@@ -231,7 +231,7 @@ func (a *OpenAIAdapter) FromCoreResponse(ctx context.Context, resp *format.CoreR
 					ID:        block.ToolUseID,
 					CallID:    block.ToolUseID,
 					Name:      block.ToolName,
-					Arguments: toolInputString(block.ToolInput),
+					Arguments: normalizePatchInput(block.ToolName, toolInputString(block.ToolInput)),
 					Status:    "completed",
 				})
 
@@ -423,7 +423,12 @@ func (a *OpenAIAdapter) streamLoop(ctx context.Context, coreReq *format.CoreRequ
 			}
 			index := event.Index
 
-			switch event.ContentBlock.Type {
+			blockType := event.ContentBlock.Type
+			if blockType == "reasoning" && !hasReasoningRequested(coreReq) {
+				blockType = "text"
+			}
+
+			switch blockType {
 			case "text":
 				id := fmt.Sprintf("msg_item_%d", index)
 				itemIDs[index] = id
@@ -473,7 +478,7 @@ func (a *OpenAIAdapter) streamLoop(ctx context.Context, coreReq *format.CoreRequ
 					ID:        toolUseID,
 					CallID:    toolUseID,
 					Name:      event.ContentBlock.ToolName,
-					Arguments: toolInputString(event.ContentBlock.ToolInput),
+					Arguments: normalizePatchInput(event.ContentBlock.ToolName, toolInputString(event.ContentBlock.ToolInput)),
 					Status:    "in_progress",
 				}
 				outputIndexes[index] = len(response.Output)
@@ -904,6 +909,37 @@ func (a *OpenAIAdapter) streamLoop(ctx context.Context, coreReq *format.CoreRequ
 	a.hooks.OnStreamComplete(ctx, coreReq.Model, outputText)
 }
 
+// hasReasoningRequested checks whether the original request asked for reasoning.
+// DeepSeek V4 always returns thinking blocks regardless, but reasoning_summary
+// events should only be emitted when the client explicitly requested reasoning.
+// When reasoning wasn't requested, thinking blocks are treated as regular text
+// to avoid "ReasoningSummaryDelta without active item" errors in Codex.
+//
+// It checks three sources:
+//
+//  1. Output.Effort — OpenAI-native reasoning effort (used by o3/o4-mini).
+//     True when the field is set to a non-empty, non-"none" value.
+//
+//  2. Thinking.Type — Anthropic/Claude extended thinking.
+//     True when Thinking is present and Type == "enabled".
+//
+//  3. Extensions["openai"]["reasoning"] — generic passthrough for provider-specific
+//     reasoning configuration injected via request extensions.
+func hasReasoningRequested(coreReq *format.CoreRequest) bool {
+	if coreReq.Output != nil && coreReq.Output.Effort != "" && coreReq.Output.Effort != "none" {
+		return true
+	}
+	if coreReq.Thinking != nil && coreReq.Thinking.Type == "enabled" {
+		return true
+	}
+	if openaiExt, ok := coreReq.Extensions["openai"].(map[string]any); ok {
+		if _, ok := openaiExt["reasoning"]; ok {
+			return true
+		}
+	}
+	return false
+}
+
 // ============================================================================
 // Input Conversion Helpers
 // ============================================================================
@@ -973,6 +1009,15 @@ func convertInput(raw json.RawMessage) ([]format.CoreMessage, []format.CoreConte
 
 	for _, item := range items {
 		if item.Type == "function_call_output" {
+			// Merge pending reasoning into pendingFCBlocks so they become
+			// a single assistant message. This keeps tool_use and tool_result
+			// adjacent, satisfying the Anthropic protocol requirement that
+			// every tool_use must be immediately followed by a tool_result
+			// in the next message.
+			if len(pendingReasoning) > 0 {
+				pendingFCBlocks = append(pendingFCBlocks, pendingReasoning...)
+				pendingReasoning = pendingReasoning[:0]
+			}
 			// Flush pending function_calls before tool results.
 			if len(pendingFCBlocks) > 0 {
 				flushed := make([]format.CoreContentBlock, len(pendingFCBlocks))
@@ -982,16 +1027,6 @@ func convertInput(raw json.RawMessage) ([]format.CoreMessage, []format.CoreConte
 					Content: flushed,
 				})
 				pendingFCBlocks = pendingFCBlocks[:0]
-			}
-			// Flush pending reasoning before tool results.
-			if len(pendingReasoning) > 0 {
-				flushedReasoning := make([]format.CoreContentBlock, len(pendingReasoning))
-				copy(flushedReasoning, pendingReasoning)
-				messages = append(messages, format.CoreMessage{
-					Role:    "assistant",
-					Content: flushedReasoning,
-				})
-				pendingReasoning = pendingReasoning[:0]
 			}
 			// Each tool result → separate tool-role Core message.
 			messages = append(messages, format.CoreMessage{
@@ -1072,7 +1107,12 @@ func convertInput(raw json.RawMessage) ([]format.CoreMessage, []format.CoreConte
 				blocks = append(pendingReasoning, blocks...)
 				pendingReasoning = pendingReasoning[:0]
 			}
-			if len(blocks) > 0 {
+			if len(pendingFCBlocks) > 0 {
+				// Merge into pendingFCBlocks to keep tool_use + text in one
+				// assistant message. This preserves tool_use/tool_result adjacency
+				// required by the Anthropic protocol.
+				pendingFCBlocks = append(pendingFCBlocks, blocks...)
+			} else if len(blocks) > 0 {
 				messages = append(messages, format.CoreMessage{
 					Role:    "assistant",
 					Content: blocks,
@@ -1427,6 +1467,105 @@ func toolInputString(input json.RawMessage) string {
 		return "{}"
 	}
 	return string(input)
+}
+
+// normalizePatchInput normalizes apply_patch tool input from various DeepSeek-generated
+// patch formats into Codex's expected *** Begin Patch / *** End Patch format.
+//
+// DeepSeek sometimes generates non-standard patch markers (*** Add File, *** Modify File)
+// or bare unified diffs without the Begin/End Patch delimiters. This normalizes them
+// deterministically so the agent doesn't need to fall back to heredoc.
+func normalizePatchInput(toolName, input string) string {
+	lower := strings.ToLower(toolName)
+	if lower != "apply_patch" && lower != "patch" {
+		return input
+	}
+
+	trimmed := strings.TrimSpace(input)
+	if trimmed == "" || trimmed == "{}" {
+		return input
+	}
+
+	// If input is a JSON object with an "input" field, normalize the inner value.
+	if strings.HasPrefix(trimmed, "{") {
+		var obj map[string]any
+		if err := json.Unmarshal([]byte(trimmed), &obj); err == nil {
+			if patchStr, ok := obj["input"].(string); ok && patchStr != "" {
+				normalized := normalizePatchContent(patchStr)
+				if normalized == patchStr {
+					return input // unchanged
+				}
+				obj["input"] = normalized
+				if result, err := json.Marshal(obj); err == nil {
+					return string(result)
+				}
+			}
+		}
+		return input
+	}
+
+	// Plain string content — normalize directly.
+	return normalizePatchContent(trimmed)
+}
+
+// normalizePatchContent normalizes a raw patch string to *** Begin Patch / *** End Patch format.
+func normalizePatchContent(content string) string {
+	trimmed := strings.TrimSpace(content)
+	if trimmed == "" {
+		return content
+	}
+
+	// Already in the expected format.
+	if strings.Contains(trimmed, "*** Begin Patch") {
+		return trimmed
+	}
+
+	hadNonStandardMarker := false
+
+	// Strip non-standard *** markers (Add File, Modify File, Delete File).
+	// These are DeepSeek inventions that Codex doesn't recognize.
+	for _, marker := range []string{"*** Add File", "*** Modify File", "*** Delete File", "*** Update File"} {
+		if strings.HasPrefix(trimmed, marker) {
+			hadNonStandardMarker = true
+			// Remove the marker and any path line that follows it.
+			trimmed = strings.TrimPrefix(trimmed, marker)
+			trimmed = strings.TrimSpace(trimmed)
+			// If the next line looks like a file path (no diff markers), skip it.
+			if idx := strings.Index(trimmed, "\n"); idx >= 0 {
+				firstLine := strings.TrimSpace(trimmed[:idx])
+				if !strings.HasPrefix(firstLine, "---") && !strings.HasPrefix(firstLine, "+++") &&
+					!strings.HasPrefix(firstLine, "@@") && !strings.HasPrefix(firstLine, "diff ") {
+					trimmed = strings.TrimSpace(trimmed[idx+1:])
+				}
+			}
+			break
+		}
+	}
+
+	// If we stripped a non-standard marker, we know this is patch content — always wrap.
+	if hadNonStandardMarker {
+		return "*** Begin Patch\n" + trimmed + "\n*** End Patch"
+	}
+
+	// Detect if this looks like a diff/patch.
+	looksLikePatch := false
+	for _, pattern := range []string{"\n--- ", "\n+++ ", "\n@@ ", "diff --git "} {
+		if strings.Contains(trimmed, pattern) {
+			looksLikePatch = true
+			break
+		}
+	}
+	if strings.HasPrefix(trimmed, "--- ") || strings.HasPrefix(trimmed, "+++ ") ||
+		strings.HasPrefix(trimmed, "@@ ") || strings.HasPrefix(trimmed, "diff --git ") {
+		looksLikePatch = true
+	}
+
+	if looksLikePatch {
+		return "*** Begin Patch\n" + trimmed + "\n*** End Patch"
+	}
+
+	// Not a recognizable patch format; pass through unchanged.
+	return content
 }
 
 // outputToString converts a json.RawMessage Output field to a string.
